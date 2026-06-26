@@ -1,0 +1,17 @@
+ktem_app_data/
+kotaemon/ktem_app_data/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.venv/
+kotaemon/.venv/
+**/node_modules/
+.env
+kotaemon/.env
+*.log
+.runtime_*.log
+page_check.html
+*_check.html
+build/
+dist/
+nul
