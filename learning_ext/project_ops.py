@@ -42,7 +42,9 @@ def _dedupe_by_id(rows: list[Any]) -> list[Any]:
     return result
 
 
-def delete_project(session: Session, project_id: int) -> dict:
+def clear_project_learning_data(
+    session: Session, project_id: int, *, commit: bool = True
+) -> dict:
     project = session.get(LearningProject, project_id)
     if project is None:
         raise ValueError(f"Project {project_id} not found")
@@ -172,7 +174,19 @@ def delete_project(session: Session, project_id: int) -> dict:
         ),
     )
     deleted["nodes"] = _delete_rows(session, nodes)
-    deleted["projects"] = _delete_rows(session, [project])
-    session.commit()
+    if commit:
+        session.commit()
 
     return {"project_id": project_id, "deleted": deleted}
+
+
+def delete_project(session: Session, project_id: int) -> dict:
+    project = session.get(LearningProject, project_id)
+    if project is None:
+        raise ValueError(f"Project {project_id} not found")
+
+    result = clear_project_learning_data(session, project_id, commit=False)
+    result["deleted"]["projects"] = _delete_rows(session, [project])
+    session.commit()
+
+    return result

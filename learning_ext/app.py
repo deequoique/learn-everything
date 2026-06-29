@@ -289,7 +289,10 @@ footer {display:none !important;}
 
 
 class LearningApp(KotaemonApp):
+
     """带学习特化功能的 Kotaemon App"""
+
+    public_events = ["onSignOut"]
 
     def __init__(self):
         super().__init__()

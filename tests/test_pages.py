@@ -135,6 +135,18 @@ class TestStudyWorkbenchPageLogic:
         assert "width: 100%" in css
         assert "min-width: 0" in css
 
+    def test_workbench_layout_uses_full_width_and_wider_assistant_column(self):
+        import learning_ext.pages.study_workbench as wb
+
+        css = " ".join(wb.WORKBENCH_CSS.split())
+        source = inspect.getsource(wb.StudyWorkbenchPage.on_building_ui)
+
+        assert "#learning-workbench-tab" in css
+        assert "max-width: none" in css
+        assert "with gr.Column(scale=2, min_width=300" in source
+        assert "with gr.Column(scale=5, min_width=400" in source
+        assert "with gr.Column(scale=3, min_width=430" in source
+
     def test_word_lookup_js_is_event_handler_with_confirmation_popup(self):
         import learning_ext.pages.study_workbench as wb
 
@@ -336,14 +348,55 @@ class TestStudyWorkbenchPageLogic:
         assert captured == {"term": "概念", "node_id": str(node.id)}
 
 
-class TestStudyWorkbenchService:
-    def test_generate_summary_skips_existing(self, session, sample_project, mock_llm):
+    def test_append_latest_assistant_reply_adds_supplement_without_rewriting(
+        self, session, sample_project, monkeypatch
+    ):
         from sqlmodel import select
+
+        from learning_ext.db.models import KnowledgeNode
+
+        _, page = self._make_page(session, monkeypatch)
+        node = session.exec(select(KnowledgeNode)).first()
+        original = "## 原有正文\n这是原来的课程内容，应该保留。"
+        node.description = original
+        session.add(node)
+        session.commit()
+        history = [
+            {"role": "user", "content": "这里是不是还缺一个实践例子？"},
+            {
+                "role": "assistant",
+                "content": "可以补充一个最小实践：先观察输入，再写出转换步骤。",
+            },
+        ]
+
+        guide, status = page._append_last_assistant_to_node(str(node.id), history)
+
+        session.refresh(node)
+        assert "已并入本节正文" in status
+        assert original in guide
+        assert original in node.description
+        assert "AI 助教补充" in node.description
+        assert "这里是不是还缺一个实践例子" in node.description
+        assert "可以补充一个最小实践" in node.description
+
+
+class TestStudyWorkbenchService:
+    def test_generate_summary_skips_existing(
+        self, session, sample_project, mock_llm, monkeypatch
+    ):
+        from sqlmodel import select
+        import ktem.db.engine as engine_module
+
         from learning_ext.db.models import KnowledgeNode
         from learning_ext.progress.study import generate_node_summary_to_db
 
+        monkeypatch.setattr(engine_module, "engine", session.get_bind())
         node = session.exec(select(KnowledgeNode)).first()
-        node.description = "已有内容" * 20
+        node.description = (
+            "## 已有导览\n"
+            + "已有内容" * 130
+            + "\n\n## 已有练习\n- 复习已有内容。"
+        )
         session.add(node)
         session.commit()
         assert generate_node_summary_to_db(node.id, sample_project.topic) is True

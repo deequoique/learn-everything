@@ -25,6 +25,7 @@ from learning_ext.path_generator.prompts import (
     SYSTEM,
     USER_TEMPLATE,
 )
+from learning_ext.project_ops import clear_project_learning_data
 
 
 def generate_roadmap(
@@ -61,6 +62,106 @@ def refine_roadmap(
         instruction=instruction,
     )
     return chat_json(prompt, system=REFINE_SYSTEM, model_name=model_name)
+
+
+def audit_and_rewrite_roadmap(
+    roadmap: dict,
+    topic: str,
+    background: str,
+    goal: str,
+    weekly_hours: float,
+    *,
+    model_name: Optional[str] = None,
+) -> dict:
+    """Audit a generated roadmap and return an improved full roadmap."""
+    prompt = f"""请审计并修订下面这条学习路线。目标不是润色，而是确保路线完整、系统、可执行。
+
+【选题】{topic}
+【学习者背景】{background or "无特殊背景，默认初学者"}
+【学习目标】{goal or "掌握该主题的核心知识并能应用"}
+【每周可投入时间】{weekly_hours} 小时
+
+【初版路线 JSON】
+{json.dumps(roadmap, ensure_ascii=False, indent=2)}
+
+请先在脑中审计这条路线是否存在：
+- 核心前置知识缺失
+- 关键分支/实践环节缺失
+- 节点过粗，需要拆成多个小节
+- 节点过细或重复
+- 难度跃迁太大
+- 依赖关系不合理
+- 与学习目标不匹配
+
+然后直接输出一个 JSON 对象，格式如下：
+{{
+  "audit": {{
+    "score": 0-100,
+    "verdict": "可以使用|需要小修|需要重构",
+    "problems": ["问题1", "问题2"],
+    "changes": ["改动1", "改动2"]
+  }},
+  "roadmap": {{
+    "summary": "对修订后学习路线的简短总体说明",
+    "stages": [
+      {{"name": "阶段名", "stage": "base|strengthen|sprint", "goal": "本阶段目标"}}
+    ],
+    "nodes": [
+      {{
+        "code": "1.1",
+        "title": "知识点标题",
+        "description": "这个知识点要学什么、学到什么程度",
+        "stage": "base",
+        "est_hours": 2.0,
+        "difficulty": 3,
+        "prerequisites": []
+      }}
+    ]
+  }}
+}}
+
+路线要求：
+- 节点数允许扩展到 18-40 个；复杂主题宁可拆细，不要硬塞进 12-25 个节点
+- 每个节点应该是 1-4 小时可学完的粒度
+- 必须包含必要实践/项目/自测节点
+- prerequisites 只能引用存在的 code
+- 只返回 JSON，不要 markdown 代码块。"""
+    result = chat_json(
+        prompt,
+        system="你是严苛的课程路线审计员，会自动补齐遗漏、拆分过粗节点、修正依赖关系。",
+        model_name=model_name,
+    )
+    if not isinstance(result, dict):
+        raise ValueError("路线审计未返回 JSON 对象")
+    audited = result.get("roadmap") if isinstance(result.get("roadmap"), dict) else None
+    if audited is None and isinstance(result.get("nodes"), list):
+        audited = result
+    if not audited:
+        raise ValueError("路线审计结果缺少 roadmap")
+    audited["_audit"] = result.get("audit", {})
+    return audited
+
+
+def audit_existing_roadmap(
+    roadmap: dict,
+    topic: str,
+    background: str,
+    goal: str,
+    weekly_hours: float,
+    *,
+    model_name: Optional[str] = None,
+) -> tuple[dict, dict]:
+    """Return (audit, improved_roadmap) for an existing project roadmap."""
+    improved = audit_and_rewrite_roadmap(
+        roadmap=roadmap,
+        topic=topic,
+        background=background,
+        goal=goal,
+        weekly_hours=weekly_hours,
+        model_name=model_name,
+    )
+    audit = improved.pop("_audit", {})
+    return audit, improved
 
 
 def save_roadmap(
@@ -129,6 +230,63 @@ def save_roadmap(
             session.add(edge)
 
     session.commit()
+    return project
+
+
+def replace_project_roadmap(
+    session: Session,
+    project_id: int,
+    roadmap: dict,
+) -> LearningProject:
+    """Replace a project's nodes/edges with an audited roadmap."""
+    project = session.get(LearningProject, int(project_id))
+    if project is None:
+        raise ValueError(f"Project {project_id} not found")
+
+    clear_project_learning_data(session, project.id, commit=False)
+    session.flush()
+
+    project.title = roadmap.get("summary", project.title)[:80] or project.title
+    project.roadmap_json = json.dumps(roadmap, ensure_ascii=False)
+    session.add(project)
+    session.flush()
+
+    code_to_id: dict[str, int] = {}
+    for node_data in roadmap.get("nodes", []):
+        node = KnowledgeNode(
+            project_id=project.id,
+            code=node_data["code"],
+            title=node_data["title"],
+            description=node_data.get("description", ""),
+            stage=node_data.get("stage", "base"),
+            est_hours=float(node_data.get("est_hours", 2.0)),
+            difficulty=int(node_data.get("difficulty", 3)),
+            mastery=0.0,
+            status="pending",
+        )
+        session.add(node)
+        session.flush()
+        code_to_id[node.code] = node.id
+
+    for node_data in roadmap.get("nodes", []):
+        source_id = code_to_id.get(node_data["code"])
+        if source_id is None:
+            continue
+        for prereq_code in node_data.get("prerequisites", []):
+            target_id = code_to_id.get(prereq_code)
+            if target_id is None or target_id == source_id:
+                continue
+            session.add(
+                KnowledgeEdge(
+                    project_id=project.id,
+                    source_id=source_id,
+                    target_id=target_id,
+                    relation="prerequisite",
+                )
+            )
+
+    session.commit()
+    session.refresh(project)
     return project
 
 

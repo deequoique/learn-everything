@@ -16,9 +16,12 @@ from sqlmodel import Session, select
 
 from learning_ext.db.models import KnowledgeNode, LearningProject
 from learning_ext.path_generator import (
+    audit_existing_roadmap,
+    audit_and_rewrite_roadmap,
     generate_roadmap,
     load_roadmap,
     refine_roadmap,
+    replace_project_roadmap,
     save_roadmap,
 )
 
@@ -119,6 +122,21 @@ class PathGeneratorPage(BasePage):
             self.refresh_btn = gr.Button("🔄 刷新项目列表")
             self.load_project_id = gr.Number(label="加载项目 ID", value=0, precision=0)
             self.load_btn = gr.Button("📂 加载该项目路线")
+        with gr.Accordion("🧭 批量审计旧路线", open=False):
+            gr.Markdown(
+                "对已有项目执行路线完整性审计。系统会自动重写路线，并按新路线批量重新生成课程内容。"
+                "可输入单个 ID、多个 ID（逗号/空格分隔），或留空审计全部项目。"
+            )
+            with gr.Row():
+                self.audit_project_id = gr.Textbox(
+                    label="项目 ID（留空=全部）",
+                    placeholder="例如：3 或 3,5,8",
+                    lines=1,
+                )
+                self.audit_project_btn = gr.Button(
+                    "🧭 审计并重生成该项目", variant="primary"
+                )
+            self.audit_project_output = gr.Markdown("")
         with gr.Accordion("🗑 删除项目", open=False):
             gr.Markdown("输入项目 ID，并输入 `DELETE` 确认后删除。")
             with gr.Row():
@@ -198,6 +216,17 @@ class PathGeneratorPage(BasePage):
             inputs=[self.delete_project_id, self.delete_confirm],
             outputs=[self.project_list, self.status],
         )
+        self.audit_project_btn.click(
+            fn=self._handle_audit_project,
+            inputs=[self.audit_project_id],
+            outputs=[
+                self.project_list,
+                self.roadmap_output,
+                self.roadmap_json,
+                self.audit_project_output,
+                self.status,
+            ],
+        )
 
     # ---- 业务处理函数 ----
 
@@ -212,11 +241,20 @@ class PathGeneratorPage(BasePage):
                 goal=goal or "",
                 weekly_hours=float(hours) if hours else 10.0,
             )
-            md = self._roadmap_to_markdown(roadmap)
+            audited = audit_and_rewrite_roadmap(
+                roadmap=roadmap,
+                topic=topic.strip(),
+                background=background or "",
+                goal=goal or "",
+                weekly_hours=float(hours) if hours else 10.0,
+            )
+            audit = audited.pop("_audit", {})
+            audited_md = self._roadmap_to_markdown(audited)
+            audit_md = self._audit_to_markdown(audit)
             return (
-                md,
-                json.dumps(roadmap, ensure_ascii=False, indent=2),
-                "✅ 路线已生成，可保存为项目",
+                f"{audit_md}\n\n---\n\n{audited_md}",
+                json.dumps(audited, ensure_ascii=False, indent=2),
+                "✅ 路线已生成，并已自动审计补全，可保存为项目",
             )
         except Exception as e:
             logger.exception("生成路线失败")
@@ -396,6 +434,153 @@ class PathGeneratorPage(BasePage):
             logger.exception("删除项目失败")
             return self._refresh_projects(), f"❌ 删除失败: {e}"
 
+    def _handle_audit_project(self, project_id):
+        """审计旧项目路线，替换路线并批量重生成课程内容。"""
+        try:
+            project_ids = self._parse_audit_project_ids(project_id)
+            with Session(engine) as session:
+                if not project_ids:
+                    project_ids = [
+                        p.id
+                        for p in session.exec(
+                            select(LearningProject).order_by(LearningProject.id)
+                        ).all()
+                        if p.id is not None
+                    ]
+                if not project_ids:
+                    return (
+                        self._refresh_projects(),
+                        gr.update(),
+                        gr.update(),
+                        "⚠️ 当前没有可审计的项目",
+                        "⚠️ 当前没有可审计的项目",
+                    )
+
+            results = []
+            last_improved = None
+            last_md = ""
+            for pid in project_ids:
+                with Session(engine) as session:
+                    project = session.get(LearningProject, pid)
+                    if project is None:
+                        raise ValueError(f"项目 #{pid} 不存在")
+                    current = load_roadmap(session, pid)
+                    audit, improved = audit_existing_roadmap(
+                        roadmap=current,
+                        topic=project.topic,
+                        background=project.background,
+                        goal=project.goal,
+                        weekly_hours=project.weekly_hours,
+                    )
+                    replace_project_roadmap(session, pid, improved)
+
+                from learning_ext.progress.study import regenerate_all_content
+
+                regen = regenerate_all_content(project_id=pid, force=True)
+                audit_md = self._audit_to_markdown(audit)
+                md = self._roadmap_to_markdown(improved)
+                results.append(
+                    {
+                        "project_id": pid,
+                        "topic": project.topic,
+                        "title": project.title,
+                        "audit": audit,
+                        "audit_md": audit_md,
+                        "roadmap": improved,
+                        "roadmap_md": md,
+                        "queued": regen["queued"],
+                    }
+                )
+                last_improved = improved
+                last_md = md
+
+            if len(results) == 1:
+                result = results[0]
+                status = (
+                    f"✅ 项目 #{result['project_id']} 已完成路线审计并替换路线。"
+                    f"课程内容已排队强制重生成：{result['queued']} 节。"
+                )
+                return (
+                    self._refresh_projects(),
+                    f"{result['audit_md']}\n\n---\n\n{result['roadmap_md']}",
+                    json.dumps(result["roadmap"], ensure_ascii=False, indent=2),
+                    result["audit_md"],
+                    status,
+                )
+
+            total_queued = sum(r["queued"] for r in results)
+            summary_lines = ["## 🧭 批量路线审计结果"]
+            for result in results:
+                audit = result["audit"] or {}
+                summary_lines.append(
+                    f"- 项目 #{result['project_id']} {result['topic']}："
+                    f"评分 {audit.get('score', '未知')}，"
+                    f"结论 {audit.get('verdict', '未知')}，已排队 {result['queued']} 节"
+                )
+            audit_report = "\n\n".join(
+                [
+                    f"### 项目 #{result['project_id']}\n\n{result['audit_md']}"
+                    for result in results
+                ]
+            )
+            roadmap_md = "\n\n---\n\n".join(
+                [
+                    "\n".join(summary_lines),
+                    last_md or "*路线为空*",
+                ]
+            )
+            payload = {
+                "projects": [
+                    {
+                        "project_id": result["project_id"],
+                        "audit": result["audit"],
+                        "roadmap": result["roadmap"],
+                    }
+                    for result in results
+                ],
+                "last_roadmap": last_improved,
+            }
+            id_list = ", ".join(f"#{result['project_id']}" for result in results)
+            status = (
+                f"✅ 已完成 {len(results)} 个项目（{id_list}）的路线审计和替换，"
+                f"课程内容已排队强制重生成：{total_queued} 节。"
+            )
+            return (
+                self._refresh_projects(),
+                roadmap_md,
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                audit_report,
+                status,
+            )
+        except Exception as e:
+            logger.exception("项目路线审计失败")
+            return (
+                self._refresh_projects(),
+                gr.update(),
+                gr.update(),
+                f"❌ 审计失败: {e}",
+                f"❌ 审计失败: {e}",
+            )
+
+    @staticmethod
+    def _parse_audit_project_ids(project_id) -> list[int]:
+        if project_id is None:
+            return []
+        if isinstance(project_id, (int, float)):
+            value = int(project_id)
+            return [value] if value > 0 else []
+        raw = str(project_id).strip()
+        if not raw or raw in {"0", "0.0"}:
+            return []
+        for sep in [",", "，", ";", "；", "\n", "\t"]:
+            raw = raw.replace(sep, " ")
+        ids: list[int] = []
+        for part in raw.split():
+            value = int(float(part))
+            if value > 0 and value not in ids:
+                ids.append(value)
+        return ids
+
     def _refresh_projects(self):
         """刷新项目列表"""
         try:
@@ -423,6 +608,25 @@ class PathGeneratorPage(BasePage):
                 return rows
         except Exception:
             return []
+
+    @staticmethod
+    def _audit_to_markdown(audit: dict) -> str:
+        if not audit:
+            return "## 🧭 路线审计\n\n*审计结果为空，已保留生成路线。*"
+        lines = [
+            "## 🧭 路线自动审计",
+            f"- **评分**：{audit.get('score', '未知')}",
+            f"- **结论**：{audit.get('verdict', '未知')}",
+        ]
+        problems = audit.get("problems") or []
+        if problems:
+            lines.append("\n### 发现的问题")
+            lines.extend(f"- {p}" for p in problems)
+        changes = audit.get("changes") or []
+        if changes:
+            lines.append("\n### 自动改动")
+            lines.extend(f"- {c}" for c in changes)
+        return "\n".join(lines)
 
     @staticmethod
     def _roadmap_to_markdown(roadmap: dict) -> str:

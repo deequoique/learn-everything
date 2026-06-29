@@ -48,6 +48,7 @@ from learning_ext.progress.study import (
     regenerate_all_content,
     set_node_status,
 )
+from learning_ext.progress.audit import audit_node_content
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ RESOURCE_ICON = {
     "article": "📰",
     "tool": "🔧",
     "search": "🔍",
+    "summary": "🧠",
 }
 
 # 划词解释主脚本由 custom_app.py 内联到 Gradio 初始模板。这里保留 Gradio
@@ -80,6 +82,14 @@ function(...args){
 
 WORKBENCH_CSS = """
 <style>
+#learning-workbench-tab {
+    max-width: none !important;
+    width: 100% !important;
+}
+#learning-workbench-tab > .tabitem {
+    max-width: none !important;
+    width: 100% !important;
+}
 #le-workbench-row {
     display: flex !important;
     align-items: stretch !important;
@@ -98,8 +108,15 @@ WORKBENCH_CSS = """
     flex-wrap: nowrap !important;
     align-content: stretch !important;
 }
+#le-left-col {
+    min-width: 300px !important;
+}
 #le-center-col {
     flex-direction: column !important;
+    min-width: 400px !important;
+}
+#le-right-col {
+    min-width: 430px !important;
 }
 #le-center-col > * {
     flex: 0 0 auto !important;
@@ -107,10 +124,13 @@ WORKBENCH_CSS = """
     max-width: 100% !important;
     min-width: 0 !important;
 }
-#le-content-tabs, #le-term-result, #le-guide-md {
+#le-content-tabs, #le-guide-md {
     width: 100% !important;
     max-width: 100% !important;
     min-width: 0 !important;
+}
+#le-term-result {
+    display: none !important;
 }
 #le-guide-md {
     overflow-wrap: anywhere !important;
@@ -153,7 +173,7 @@ class StudyWorkbenchPage(BasePage):
 
         with gr.Row(equal_height=True, elem_id="le-workbench-row"):
             # ============ 左列: 项目 + 课程列表 ============
-            with gr.Column(scale=1, min_width=260, elem_id="le-left-col"):
+            with gr.Column(scale=2, min_width=300, elem_id="le-left-col"):
                 gr.Markdown("### 📂 项目")
                 with gr.Row():
                     self.project_id = gr.Dropdown(
@@ -249,7 +269,7 @@ class StudyWorkbenchPage(BasePage):
                     self.add_status = gr.Markdown("")
 
             # ============ 中列: 学习内容 ============
-            with gr.Column(scale=4, min_width=400, elem_id="le-center-col"):
+            with gr.Column(scale=5, min_width=400, elem_id="le-center-col"):
                 # 划词解释隐藏输入框 + 浮窗触发
                 self.selected_term = gr.Textbox(
                     elem_id="le-selected-term",
@@ -268,8 +288,16 @@ class StudyWorkbenchPage(BasePage):
                         self.node_guide = gr.Markdown(
                             "", elem_id="le-guide-md", elem_classes=["le-lookup-zone"]
                         )
-                        self.regen_node_btn = gr.Button("🔄 重新生成本节", size="sm")
+                        with gr.Row():
+                            self.regen_node_btn = gr.Button("🔄 重新生成本节", size="sm")
+                            self.audit_node_btn = gr.Button(
+                                "🧭 审计本节完整性", size="sm"
+                            )
                         self.regen_node_status = gr.Markdown("")
+                        with gr.Accordion("🧭 完整性审计报告", open=False):
+                            self.audit_node_output = gr.Markdown(
+                                "*点击「审计本节完整性」，让 AI 检查本节是否讲全、讲深、是否需要拆分或补充。*"
+                            )
 
                     with gr.TabItem("📝 我的笔记", elem_id="le-note-zone"):
                         gr.Markdown(
@@ -288,22 +316,28 @@ class StudyWorkbenchPage(BasePage):
                             self.note_status = gr.Markdown("")
 
                     with gr.TabItem("📚 参考资料", elem_id="le-resource-zone"):
-                        gr.Markdown("> AI 推荐资料, 点「预览」看摘要。")
+                        gr.Markdown(
+                            "> AI 会直接拉取资料正文，并基于内容生成学习汇报。"
+                        )
                         with gr.Row():
                             self.gen_resources_btn = gr.Button(
-                                "🤖 生成参考资料", size="sm"
+                                "🤖 拉取并总结资料", size="sm"
                             )
                             self.gen_resources_status = gr.Markdown("")
-                        self.resources_md = gr.Markdown("*点「生成参考资料」获取推荐*")
-                        gr.Markdown("---\n#### 📄 预览区")
-                        self.resource_preview_url = gr.Textbox(
-                            label="URL",
-                            placeholder="https://...",
-                            scale=3,
-                            show_label=False,
+                        self.resources_md = gr.Markdown(
+                            "*点「拉取并总结资料」生成学习汇报*"
                         )
-                        self.preview_btn = gr.Button("👁 预览", scale=1, size="sm")
-                        self.resource_preview = gr.Markdown("")
+                        with gr.Accordion("手动抓取单个 URL", open=False):
+                            self.resource_preview_url = gr.Textbox(
+                                label="URL",
+                                placeholder="https://...",
+                                scale=3,
+                                show_label=False,
+                            )
+                            self.preview_btn = gr.Button(
+                                "👁 抓取正文", scale=1, size="sm"
+                            )
+                            self.resource_preview = gr.Markdown("")
 
                 with gr.Accordion(
                     "🔍 划词解释结果", open=False, elem_id="le-term-result"
@@ -312,7 +346,7 @@ class StudyWorkbenchPage(BasePage):
                         '<span style="color:#6B7280;">在教学内容中选中名词, 会出现「🔍 AI 解释」浮窗。</span>'
                     )
                     self.term_explain_btn = gr.Button("🔍 解释选中词汇", size="sm")
-                    self.term_explain_output = gr.Markdown("")
+                    self.term_explain_output = gr.Markdown("", elem_id="le-term-output")
 
                 gr.Markdown("---")
                 with gr.Row():
@@ -326,7 +360,7 @@ class StudyWorkbenchPage(BasePage):
                 self.action_status = gr.Markdown("")
 
             # ============ 右列: AI 助教对话 ============
-            with gr.Column(scale=1, min_width=300, elem_id="le-right-col"):
+            with gr.Column(scale=3, min_width=430, elem_id="le-right-col"):
                 gr.Markdown(
                     "### 💬 AI 助教\n"
                     '<span style="color:#6B7280;font-size:12px;">深入探讨、纠正教学内容、补充知识。</span>'
@@ -346,6 +380,10 @@ class StudyWorkbenchPage(BasePage):
                 with gr.Row():
                     self.chat_send_btn = gr.Button("发送", variant="primary", size="sm")
                     self.chat_clear_btn = gr.Button("清空", size="sm")
+                self.append_chat_to_lesson_btn = gr.Button(
+                    "➕ 并入本节正文", variant="secondary", size="sm"
+                )
+                self.append_chat_status = gr.Markdown("")
 
     # ==================== 事件绑定 ====================
 
@@ -415,6 +453,11 @@ class StudyWorkbenchPage(BasePage):
             inputs=[self.current_node_id, self.current_project_id],
             outputs=[self.regen_node_status, self.node_header, self.node_guide],
         )
+        self.audit_node_btn.click(
+            fn=self._audit_current_node,
+            inputs=[self.current_node_id],
+            outputs=[self.audit_node_output],
+        )
         self.regen_all_btn.click(
             fn=lambda pid: self._regen_all(pid, False),
             inputs=[self.current_project_id],
@@ -471,6 +514,11 @@ class StudyWorkbenchPage(BasePage):
         self.chat_clear_btn.click(
             fn=lambda: ([], [], ""),
             outputs=[self.chatbot, self._chat_history, self.chat_input],
+        )
+        self.append_chat_to_lesson_btn.click(
+            fn=self._append_last_assistant_to_node,
+            inputs=[self.current_node_id, self._chat_history],
+            outputs=[self.node_guide, self.append_chat_status],
         )
 
         # 添加课程
@@ -633,12 +681,24 @@ class StudyWorkbenchPage(BasePage):
         lines = []
         for r in resources:
             icon = RESOURCE_ICON.get(r.rtype, "📄")
-            lines.append(f"**{icon} {r.title}**")
-            if r.url:
-                lines.append(f"[🔗 打开]({r.url})")
+            if r.rtype == "summary":
+                lines.append(f"## {icon} {r.title}")
+                lines.append(r.description or "*暂无学习汇报*")
+                lines.append("\n---")
+                continue
+
+            lines.append(f"### {icon} {r.title}")
             if r.description:
-                lines.append(f"\n{r.description}")
-            lines.append("")
+                lines.append(f"\n**资料定位**：{r.description}")
+            if r.preview:
+                excerpt = r.preview[:1800].strip()
+                suffix = "\n\n> 正文较长，已截取前 1800 字。" if len(r.preview) > 1800 else ""
+                lines.append(f"\n**已拉取正文摘录**：\n\n{excerpt}{suffix}")
+            else:
+                lines.append("\n*未能抓取到可读正文。*")
+            if r.url:
+                lines.append(f"\n来源：`{r.url}`")
+            lines.append("\n---")
         return "\n".join(lines)
 
     # ---- 自动初始化 (页面加载时执行, 预加载第一节内容) ----
@@ -659,7 +719,8 @@ class StudyWorkbenchPage(BasePage):
                         None,
                         "*请先创建学习路线*",
                         "",
-                        "*点「生成参考资料」获取推荐*",
+                        "",
+                        "*点「拉取并总结资料」生成学习汇报*",
                         [],
                         [],
                     ]
@@ -679,7 +740,7 @@ class StudyWorkbenchPage(BasePage):
                 header = "*选择课程开始学习*"
                 guide = ""
                 note_content = ""
-                res_md = "*点「生成参考资料」获取推荐*"
+                res_md = "*点「拉取并总结资料」生成学习汇报*"
                 if nodes_data:
                     first = nodes_data[0]
                     first_node_id = first["id"]
@@ -731,7 +792,8 @@ class StudyWorkbenchPage(BasePage):
                 None,
                 "*加载失败*",
                 "",
-                "*点「生成参考资料」获取推荐*",
+                "",
+                "*点「拉取并总结资料」生成学习汇报*",
                 [],
                 [],
             ]
@@ -857,7 +919,7 @@ class StudyWorkbenchPage(BasePage):
                 "*请先在下拉框中选择一节课，再点「查看课程」*",
                 "",
                 "",
-                "*点「生成参考资料」获取推荐*",
+                "*点「拉取并总结资料」生成学习汇报*",
                 [],
                 [],
             )
@@ -879,7 +941,7 @@ class StudyWorkbenchPage(BasePage):
             res_md = (
                 self._render_resources_md(resources)
                 if resources
-                else "*点「生成参考资料」获取推荐*"
+                else "*点「拉取并总结资料」生成学习汇报*"
             )
             topic = proj.topic if proj else ""
 
@@ -966,7 +1028,8 @@ class StudyWorkbenchPage(BasePage):
                 items = generate_resources(node, topic)
                 saved = save_resources_to_db(s, int(node_id), int(project_id), items)
                 res_md = self._render_resources_md(saved)
-            return res_md, f"✅ 已生成 {len(saved)} 个参考资料"
+            pulled = max(0, len(saved) - 1)
+            return res_md, f"✅ 已拉取 {pulled} 份资料并生成学习汇报"
         except Exception as e:
             return f"*生成失败: {e}*", f"❌ {e}"
 
@@ -1037,6 +1100,49 @@ class StudyWorkbenchPage(BasePage):
         except Exception as e:
             err = new_history + [{"role": "assistant", "content": f"❌ 出错了: {e}"}]
             yield err, err, ""
+
+    def _append_last_assistant_to_node(self, node_id, history):
+        if not node_id:
+            return gr.update(), "⚠️ 请先选择知识点"
+        user_question = ""
+        assistant_reply = ""
+        for item in reversed(history or []):
+            role = item.get("role")
+            content = (item.get("content") or "").strip()
+            if role == "assistant" and content and not assistant_reply:
+                assistant_reply = content
+                continue
+            if role == "user" and content and assistant_reply:
+                user_question = content
+                break
+        if not assistant_reply:
+            return gr.update(), "⚠️ 还没有可并入正文的 AI 助教回答"
+        supplement = self._build_ai_supplement_markdown(user_question, assistant_reply)
+        try:
+            with Session(engine) as s:
+                node = s.get(KnowledgeNode, int(node_id))
+                if not node:
+                    return gr.update(), "⚠️ 知识点不存在"
+                current = (node.description or "").rstrip()
+                node.description = f"{current}\n\n{supplement}" if current else supplement
+                s.add(node)
+                s.commit()
+                updated = node.description
+            return updated, "✅ 已并入本节正文末尾，原内容未改动"
+        except Exception as e:
+            return gr.update(), f"❌ 并入失败: {e}"
+
+    @staticmethod
+    def _build_ai_supplement_markdown(user_question: str, assistant_reply: str) -> str:
+        lines = [
+            "---",
+            "",
+            "## AI 助教补充",
+        ]
+        if user_question:
+            lines.extend(["", f"> 学习者追问：{user_question}"])
+        lines.extend(["", assistant_reply.strip()])
+        return "\n".join(lines)
 
     # ---- 环境配置 (generator: 流式显示命令输出) ----
     def _auto_setup(self, project_id):
@@ -1119,6 +1225,16 @@ class StudyWorkbenchPage(BasePage):
             return "✅ 已重新生成", header, guide
         except Exception as e:
             return f"❌ {e}", gr.update(), gr.update()
+
+    def _audit_current_node(self, node_id):
+        """审计当前教材是否完整全面。"""
+        if not node_id:
+            return "⚠️ 请先选择知识点"
+        try:
+            with Session(engine) as s:
+                return audit_node_content(s, int(node_id))
+        except Exception as e:
+            return f"❌ 审计失败: {e}"
 
     def _regen_all(self, project_id, force=False):
         try:

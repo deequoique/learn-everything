@@ -8,6 +8,8 @@ kotaemon/.venv/
 **/node_modules/
 .env
 kotaemon/.env
+.tmp/
+.uv-cache/
 *.log
 .runtime_*.log
 page_check.html
