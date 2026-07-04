@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import re
 from datetime import datetime
 from typing import List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from sqlmodel import Session, select
 
@@ -72,23 +73,26 @@ def get_resources(session: Session, node_id: int) -> List[NodeResource]:
 
 
 def generate_resources(node: KnowledgeNode, project_topic: str) -> List[dict]:
-    """AI 推荐资料、抓取正文，并基于抓取内容生成学习汇报。"""
-    prompt = f"""请为以下学习知识点推荐 4-6 个高质量、可直接阅读和抓取正文的公开网页资料。返回 JSON 数组，每项：
+    """AI 推荐正文实际用到的参考资料，并抓取 PDF/HTML 正文入库。"""
+    prompt = f"""请根据下面这节课程正文，找出正文实际需要引用或支撑的参考资料。返回 JSON 数组，每项：
 {{
   "title": "资料名称",
-  "url": "可直接打开的资料页面链接",
-  "rtype": "doc|article|tool",
-  "description": "为什么推荐这个资料 + 它涵盖什么 (1-2句)"
+  "url": "可直接打开的 PDF 或 HTML 页面链接",
+  "rtype": "pdf|html|doc|article|tool",
+  "reference_for": "这份资料对应课程正文的哪一节/哪一部分，例如 ## LoRA 原理",
+  "description": "它支撑正文里的哪个概念、公式、流程或代码 (1句)"
 }}
 
 【学习主题】{project_topic}
 【知识点】{node.title} ({node.code})
-【知识点说明】{(node.description or "")[:300]}
+【课程正文】
+{(node.description or "")[:5000]}
 
 规则：
-- 优先推荐官方文档、权威教程、知名开源项目文档、可阅读的技术文章
+- 只推荐正文会用到的资料，不要泛泛推荐延伸阅读
+- 有 PDF 论文、白皮书、官方 PDF 时优先 PDF；没有 PDF 再给 HTML 文档或文章
 - 不要返回搜索结果页、视频站首页、书籍购买页、需要登录的页面
-- 资料要真实存在, 不要编造
+- 资料要真实存在，不要编造
 - 只返回 JSON 数组"""
     from learning_ext.llm import chat_json
 
@@ -104,33 +108,31 @@ def generate_resources(node: KnowledgeNode, project_topic: str) -> List[dict]:
         if not _is_fetchable_url(url):
             continue
         fetched = fetch_resource_content(url)
+        fetched_format = fetched.get("format") or _resource_format_from_url(url)
+        rtype = _normalize_resource_type(item.get("rtype"), fetched_format)
+        reference_for = (
+            item.get("reference_for")
+            or item.get("section")
+            or item.get("used_for")
+            or "本节相关内容"
+        )
+        note = str(item.get("description", "")).strip()
+        description = _build_resource_description(
+            reference_for=reference_for,
+            note=note,
+            fetched=fetched,
+        )
         resource = {
             "title": fetched.get("title") or item.get("title", ""),
             "url": fetched.get("url") or url,
-            "rtype": item.get("rtype", "article"),
-            "description": item.get("description", ""),
+            "rtype": rtype,
+            "description": description,
             "preview": fetched.get("content", ""),
             "fetch_status": fetched.get("status", ""),
         }
-        if fetched.get("ok") and len(resource["preview"]) >= 300:
-            fetched_resources.append(resource)
-        else:
-            resource["description"] = (
-                f"{resource['description']}\n\n抓取失败：{fetched.get('error', '正文过短或不可读')}"
-            ).strip()
-            fetched_resources.append(resource)
+        fetched_resources.append(resource)
 
-    report = summarize_fetched_resources(node, project_topic, fetched_resources)
-    return [
-        {
-            "title": "AI 资料学习汇报",
-            "url": "",
-            "rtype": "summary",
-            "description": report,
-            "preview": "",
-        },
-        *fetched_resources,
-    ]
+    return fetched_resources
 
 
 def save_resources_to_db(
@@ -166,6 +168,34 @@ def save_resources_to_db(
 def _is_fetchable_url(url: str) -> bool:
     parsed = urlparse(url)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _resource_format_from_url(url: str) -> str:
+    path = urlparse(url).path.lower()
+    if path.endswith(".pdf"):
+        return "pdf"
+    return "html"
+
+
+def _normalize_resource_type(raw_type, fetched_format: str) -> str:
+    rtype = str(raw_type or "").strip().lower()
+    if fetched_format == "pdf":
+        return "pdf"
+    if fetched_format in {"html", "text"}:
+        return "html"
+    return rtype or "html"
+
+
+def _build_resource_description(reference_for: str, note: str, fetched: dict) -> str:
+    lines = [f"参考位置：{str(reference_for).strip() or '本节相关内容'}"]
+    if note:
+        lines.append(f"说明：{note}")
+    if fetched.get("ok"):
+        fmt = str(fetched.get("format") or "").upper() or "HTML"
+        lines.append(f"抓取状态：已拉取 {fmt} 正文")
+    else:
+        lines.append(f"抓取状态：失败 - {fetched.get('error', '正文过短或不可读')}")
+    return "\n".join(lines)
 
 
 def _extract_text_from_html(html: str) -> tuple[str, str]:
@@ -205,6 +235,77 @@ def _extract_text_from_html(html: str) -> tuple[str, str]:
     return title, text
 
 
+def _charset_from_content_type(content_type: str) -> Optional[str]:
+    match = re.search(r"charset=([A-Za-z0-9._-]+)", content_type or "", re.I)
+    return match.group(1) if match else None
+
+
+def _charset_from_html_meta(content: bytes) -> Optional[str]:
+    head = content[:4096]
+    match = re.search(
+        rb"<meta[^>]+charset=[\"']?\s*([A-Za-z0-9._-]+)",
+        head,
+        re.I,
+    )
+    if match:
+        return match.group(1).decode("ascii", errors="ignore")
+    return None
+
+
+def _decode_response_text(resp) -> str:
+    content = getattr(resp, "content", b"") or b""
+    if not content:
+        return getattr(resp, "text", "") or ""
+    encodings = [
+        _charset_from_html_meta(content),
+        _charset_from_content_type(resp.headers.get("content-type", "")),
+        getattr(resp, "encoding", None),
+        getattr(resp, "apparent_encoding", None),
+        "utf-8",
+    ]
+    tried = set()
+    for encoding in encodings:
+        if not encoding:
+            continue
+        normalized = str(encoding).strip()
+        if not normalized or normalized.lower() in tried:
+            continue
+        tried.add(normalized.lower())
+        try:
+            return content.decode(normalized)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    try:
+        from charset_normalizer import from_bytes
+
+        best = from_bytes(content).best()
+        if best is not None:
+            return str(best)
+    except Exception:
+        pass
+    return content.decode("utf-8", errors="replace")
+
+
+def _title_from_url(url: str) -> str:
+    path = urlparse(url).path.rstrip("/")
+    name = path.rsplit("/", 1)[-1] if path else ""
+    return unquote(name) or url
+
+
+def _extract_pdf_text(content: bytes, *, max_chars: int = 12000) -> str:
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(content))
+    chunks = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        if text.strip():
+            chunks.append(text.strip())
+        if sum(len(chunk) for chunk in chunks) >= max_chars:
+            break
+    return "\n\n".join(chunks)[:max_chars]
+
+
 def fetch_resource_content(url: str, *, max_chars: int = 12000) -> dict:
     """Fetch a resource URL and return extracted readable text."""
     if not _is_fetchable_url(url):
@@ -233,16 +334,46 @@ def fetch_resource_content(url: str, *, max_chars: int = 12000) -> dict:
             }
 
         content_type = resp.headers.get("content-type", "").lower()
+        is_pdf = "application/pdf" in content_type or urlparse(
+            resp.url or url
+        ).path.lower().endswith(".pdf")
+        if is_pdf:
+            title = _title_from_url(resp.url or url)
+            text = _extract_pdf_text(resp.content, max_chars=max_chars)
+            text = re.sub(r"\s+\n", "\n", text).strip()
+            if len(text) < 50:
+                return {
+                    "ok": False,
+                    "title": title,
+                    "url": resp.url or url,
+                    "status": resp.status_code,
+                    "format": "pdf",
+                    "content": text,
+                    "error": "PDF 未提取到足够正文",
+                }
+            return {
+                "ok": True,
+                "title": title,
+                "url": resp.url or url,
+                "status": resp.status_code,
+                "format": "pdf",
+                "content": text[:max_chars],
+            }
+
+        decoded_text = _decode_response_text(resp)
         if "text/plain" in content_type:
             title = urlparse(resp.url).path.rsplit("/", 1)[-1] or resp.url
-            text = resp.text
+            text = decoded_text
+            fmt = "text"
         elif "html" in content_type or not content_type:
-            title, text = _extract_text_from_html(resp.text)
+            title, text = _extract_text_from_html(decoded_text)
+            fmt = "html"
         else:
             return {
                 "ok": False,
                 "url": resp.url or url,
                 "status": resp.status_code,
+                "format": "unknown",
                 "error": f"暂不支持抓取该内容类型：{content_type or 'unknown'}",
             }
 
@@ -253,6 +384,7 @@ def fetch_resource_content(url: str, *, max_chars: int = 12000) -> dict:
                 "title": title,
                 "url": resp.url or url,
                 "status": resp.status_code,
+                "format": fmt,
                 "content": text,
                 "error": "页面正文过短，可能需要登录或主要内容由脚本渲染",
             }
@@ -261,58 +393,11 @@ def fetch_resource_content(url: str, *, max_chars: int = 12000) -> dict:
             "title": title or resp.url or url,
             "url": resp.url or url,
             "status": resp.status_code,
+            "format": fmt,
             "content": text[:max_chars],
         }
     except Exception as e:
         return {"ok": False, "url": url, "error": str(e)}
-
-
-def summarize_fetched_resources(
-    node: KnowledgeNode, project_topic: str, resources: List[dict]
-) -> str:
-    """Ask the LLM to summarize fetched resource contents into a study report."""
-    readable = [r for r in resources if r.get("preview") and len(r["preview"]) >= 300]
-    if not readable:
-        return (
-            "没有成功抓取到足够正文，暂时无法基于资料内容生成学习汇报。"
-            "请检查网络或更换资料来源。"
-        )
-
-    blocks = []
-    total_chars = 0
-    for idx, item in enumerate(readable, 1):
-        snippet = item["preview"][:2600]
-        total_chars += len(snippet)
-        if total_chars > 12000:
-            break
-        blocks.append(
-            f"【资料{idx}】{item.get('title')}\n"
-            f"来源：{item.get('url')}\n"
-            f"正文摘录：\n{snippet}"
-        )
-
-    prompt = f"""你已经替学习者拉取了以下参考资料正文。请基于这些正文做学习汇报，不要泛泛而谈，也不要只复述链接。
-
-【学习主题】{project_topic}
-【当前知识点】{node.title} ({node.code})
-【知识点说明】{(node.description or "")[:1200]}
-
-{chr(10).join(blocks)}
-
-请用 Markdown 输出：
-1. 这一批资料共同讲了什么，和当前知识点的关系
-2. 学习者应该优先掌握的 3-5 个要点
-3. 推荐学习顺序：先看哪份、带着什么问题看
-4. 易错点/容易误解的地方
-5. 一个 15-30 分钟可完成的小练习或自测任务
-
-要求：像导师汇报一样直接、具体，控制在 900 字以内。"""
-    return chat(
-        prompt,
-        system="你是严谨的学习研究助理，会基于已抓取资料正文做归纳和学习建议。",
-        temperature=0.25,
-        max_tokens=1600,
-    )
 
 
 def fetch_preview(url: str) -> str:

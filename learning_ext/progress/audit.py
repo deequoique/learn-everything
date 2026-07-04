@@ -52,7 +52,6 @@ def _resource_context(session: Session, node_id: int) -> str:
     lines = []
     for idx, res in enumerate(resources, 1):
         if res.rtype == "summary":
-            lines.append(f"【AI资料学习汇报】\n{(res.description or '')[:1800]}")
             continue
         preview = (res.preview or "").strip()
         if len(preview) > 1200:
@@ -63,7 +62,7 @@ def _resource_context(session: Session, node_id: int) -> str:
             f"定位: {res.description or '无'}\n"
             f"正文摘录: {preview or '未抓取到正文'}"
         )
-    return "\n\n".join(lines)
+    return "\n\n".join(lines) if lines else "暂无已抓取参考资料。"
 
 
 def audit_node_content(session: Session, node_id: int) -> str:

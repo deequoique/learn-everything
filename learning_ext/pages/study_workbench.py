@@ -66,6 +66,8 @@ STAGE_NAMES = {"base": "🌱 基础", "strengthen": "💪 强化", "sprint": "�
 
 RESOURCE_ICON = {
     "doc": "📄",
+    "html": "🌐",
+    "pdf": "📕",
     "video": "🎬",
     "book": "📖",
     "article": "📰",
@@ -73,6 +75,8 @@ RESOURCE_ICON = {
     "search": "🔍",
     "summary": "🧠",
 }
+
+RESOURCE_EMPTY_MD = "*点「拉取参考资料」自动抓取本节正文引用来源*"
 
 # 划词解释主脚本由 custom_app.py 内联到 Gradio 初始模板。这里保留 Gradio
 # 事件侧的轻量兜底: 如果事件 JS 可用, 重新确认监听器已安装。
@@ -333,15 +337,15 @@ class StudyWorkbenchPage(BasePage):
 
                     with gr.TabItem("📚 参考资料", elem_id="le-resource-zone"):
                         gr.Markdown(
-                            "> AI 会直接拉取资料正文，并基于内容生成学习汇报。"
+                            "> AI 会拉取本节正文用到的参考来源，优先保存 PDF，其次保存网页 HTML。"
                         )
                         with gr.Row():
                             self.gen_resources_btn = gr.Button(
-                                "🤖 拉取并总结资料", size="sm"
+                                "🤖 拉取参考资料", size="sm"
                             )
                             self.gen_resources_status = gr.Markdown("")
                         self.resources_md = gr.Markdown(
-                            "*点「拉取并总结资料」生成学习汇报*"
+                            RESOURCE_EMPTY_MD
                         )
                         with gr.Accordion("手动抓取单个 URL", open=False):
                             self.resource_preview_url = gr.Textbox(
@@ -704,26 +708,21 @@ class StudyWorkbenchPage(BasePage):
     def _render_resources_md(self, resources):
         lines = []
         for r in resources:
-            icon = RESOURCE_ICON.get(r.rtype, "📄")
             if r.rtype == "summary":
-                lines.append(f"## {icon} {r.title}")
-                lines.append(r.description or "*暂无学习汇报*")
-                lines.append("\n---")
                 continue
-
+            icon = RESOURCE_ICON.get(r.rtype, "📄")
             lines.append(f"### {icon} {r.title}")
+            lines.append(f"\n类型：`{(r.rtype or 'html').upper()}`")
             if r.description:
-                lines.append(f"\n**资料定位**：{r.description}")
+                lines.append(f"\n{r.description}")
             if r.preview:
-                excerpt = r.preview[:1800].strip()
-                suffix = "\n\n> 正文较长，已截取前 1800 字。" if len(r.preview) > 1800 else ""
-                lines.append(f"\n**已拉取正文摘录**：\n\n{excerpt}{suffix}")
+                lines.append("\n已拉取正文内容，后台已保存用于审计与后续引用。")
             else:
                 lines.append("\n*未能抓取到可读正文。*")
             if r.url:
                 lines.append(f"\n来源：`{r.url}`")
             lines.append("\n---")
-        return "\n".join(lines)
+        return "\n".join(lines) if lines else "*暂无可展示参考资料。*"
 
     def _render_practice_md(self, task):
         if not task or not task.description:
@@ -750,7 +749,7 @@ class StudyWorkbenchPage(BasePage):
                         "",
                         "*本节暂无实操课程。*",
                         "",
-                        "*点「拉取并总结资料」生成学习汇报*",
+                        RESOURCE_EMPTY_MD,
                         [],
                         [],
                     ]
@@ -771,7 +770,7 @@ class StudyWorkbenchPage(BasePage):
                 guide = ""
                 practice_md = "*本节暂无实操课程。*"
                 note_content = ""
-                res_md = "*点「拉取并总结资料」生成学习汇报*"
+                res_md = RESOURCE_EMPTY_MD
                 if nodes_data:
                     first = nodes_data[0]
                     first_node_id = first["id"]
@@ -833,7 +832,7 @@ class StudyWorkbenchPage(BasePage):
                 "",
                 "*本节暂无实操课程。*",
                 "",
-                "*点「拉取并总结资料」生成学习汇报*",
+                RESOURCE_EMPTY_MD,
                 [],
                 [],
             ]
@@ -960,19 +959,19 @@ class StudyWorkbenchPage(BasePage):
                 "",
                 "*本节暂无实操课程。*",
                 "",
-                "*点「拉取并总结资料」生成学习汇报*",
+                RESOURCE_EMPTY_MD,
                 [],
                 [],
             )
         try:
             nid = int(node_id)
         except (ValueError, TypeError):
-            return None, "*ID无效*", "", "*本节暂无实操课程。*", "", "*点击生成*", [], []
+            return None, "*ID无效*", "", "*本节暂无实操课程。*", "", RESOURCE_EMPTY_MD, [], []
 
         with Session(engine) as session:
             node = session.get(KnowledgeNode, nid)
             if not node:
-                return None, "*知识点不存在*", "", "*本节暂无实操课程。*", "", "*点击生成*", [], []
+                return None, "*知识点不存在*", "", "*本节暂无实操课程。*", "", RESOURCE_EMPTY_MD, [], []
             proj = session.get(LearningProject, node.project_id)
             header = self._build_node_header(node, proj)
             guide = node.description or ""
@@ -1079,14 +1078,14 @@ class StudyWorkbenchPage(BasePage):
     # ---- 参考资料 ----
     def _ensure_resources_background(self, node_id, project_id):
         if not node_id or not project_id:
-            return "*点「拉取并总结资料」生成学习汇报*"
+            return RESOURCE_EMPTY_MD
         try:
             with Session(engine) as s:
                 existing = get_resources(s, int(node_id))
                 if existing:
                     return self._render_resources_md(existing)
         except Exception:
-            return "*点「拉取并总结资料」生成学习汇报*"
+            return RESOURCE_EMPTY_MD
 
         import threading
 
@@ -1124,8 +1123,10 @@ class StudyWorkbenchPage(BasePage):
                 items = generate_resources(node, topic)
                 saved = save_resources_to_db(s, int(node_id), int(project_id), items)
                 res_md = self._render_resources_md(saved)
-            pulled = max(0, len(saved) - 1)
-            return res_md, f"✅ 已拉取 {pulled} 份资料并生成学习汇报"
+            pulled = len(saved)
+            if pulled == 0:
+                return res_md, "⚠️ 未拉取到可展示参考资料"
+            return res_md, f"✅ 已拉取 {pulled} 份参考资料"
         except Exception as e:
             return f"*生成失败: {e}*", f"❌ {e}"
 
