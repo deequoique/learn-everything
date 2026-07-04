@@ -118,6 +118,8 @@ def generate_node_summary(
     node: KnowledgeNode,
     project_topic: str,
     *,
+    learning_goal: str = "",
+    environment_context: str = "",
     model_name: Optional[str] = None,
 ) -> str:
     """为单个知识点生成完整、充实的多级笔记式教学内容。
@@ -130,8 +132,11 @@ def generate_node_summary(
 
 请像一位资深讲师那样，写出一份**详尽、系统、可直接用于自学**的课程笔记。
 目标读者：{f"难度{node.difficulty}/5 的学习者（" + ("零基础" if node.difficulty <= 2 else "有一定基础" if node.difficulty <= 3 else "进阶") + "）"}
+学习目标：{learning_goal or "掌握该主题的核心知识并能应用到真实任务"}
 建议学时：{node.est_hours} 小时
 知识点定位：{node.description or "（本节核心内容，请自行展开）"}
+环境配置上下文：
+{environment_context or "未提供具体环境清单。请根据学习主题和本节内容自行给出可落地的最小环境假设。"}
 
 # 输出要求（严格遵守）
 
@@ -168,9 +173,17 @@ def generate_node_summary(
 ### ...
 
 ## 💻 代码示例 / 实操
-（如果是编程/工具类主题：给出 2-3 个**完整可运行**的代码示例，每个示例带注释说明。
-如果非编程：给出具体的例子、案例、公式推导。用代码块格式呈现。
-**至少 2 个示例**）
+这一节必须从“配置好环境以后，学习者马上能做什么”出发，而不是为了凑篇幅写一段单纯计算数据的小代码。
+
+如果主题涉及编程、AI 工具、开发环境、数据分析、自动化、模型调用或任何可操作工具：
+- 必须给出 2-3 个**真实可运行**的实操代码/命令，每个示例都要服务于本节课题和学习目标。
+- 必须显式写出运行前提、文件名、安装命令、启动命令、环境变量或本地服务地址。
+- 必须围绕本节课程内容设计任务，不得只写 1+1、随机数、玩具加法器、纯粹循环打印等脱离课程目标的示例。
+- 如果学习主题或环境配置中出现 LM Studio，必须给出 OpenAI Compatible Server 的调用示例，并使用 `http://localhost:1234/v1`。
+- 如果学习主题或环境配置中出现 Ollama，必须给出 Ollama HTTP API 或 Python SDK 调用示例，并使用 `http://localhost:11434`。
+- 每段代码后写“这段代码验证了什么”和“常见报错怎么排查”。
+
+如果主题不适合写代码，也必须给出 2 个可执行的实操任务/分析模板/练习流程，用清单或伪代码呈现。
 
 ## ⚖️ 对比与辨析
 （用表格或对比的方式，把本节概念与相关/易混概念区分清楚）
@@ -317,7 +330,12 @@ def get_nodes_without_content(
 
 
 def generate_node_summary_to_db(
-    node_id: int, project_topic: str, *, force: bool = False
+    node_id: int,
+    project_topic: str,
+    *,
+    force: bool = False,
+    learning_goal: str = "",
+    environment_context: str = "",
 ) -> bool:
     """为单个节点生成教学内容并落库 (可在后台线程调用, 自建独立 session)。
 
@@ -335,7 +353,25 @@ def generate_node_summary_to_db(
             # 用 is_content_valid 判断是否已有有效内容 (避免跳过路线生成时的简短描述)
             if is_content_valid(node.description) and not force:
                 return True
-            summary = generate_node_summary(node, project_topic)
+            if not learning_goal or not environment_context:
+                project = s.get(LearningProject, node.project_id)
+                if project and not learning_goal:
+                    learning_goal = project.goal or ""
+                if not environment_context:
+                    env_task = s.exec(
+                        select(Task)
+                        .where(Task.project_id == node.project_id)
+                        .where(Task.task_type == "env")
+                        .order_by(Task.id.desc())
+                    ).first()
+                    if env_task:
+                        environment_context = env_task.description
+            summary = generate_node_summary(
+                node,
+                project_topic,
+                learning_goal=learning_goal,
+                environment_context=environment_context,
+            )
             node.description = summary
             s.add(node)
             s.commit()
@@ -352,6 +388,8 @@ def generate_summaries_background(
     max_workers: int = 3,
     *,
     force: bool = False,
+    learning_goal: str = "",
+    environment_context: str = "",
 ) -> None:
     """启动后台 daemon 线程池, 并发生成教学内容 (不阻塞 UI)。
 
@@ -365,7 +403,12 @@ def generate_summaries_background(
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
                 pool.submit(
-                    generate_node_summary_to_db, nid, project_topic, force=force
+                    generate_node_summary_to_db,
+                    nid,
+                    project_topic,
+                    force=force,
+                    learning_goal=learning_goal,
+                    environment_context=environment_context,
                 ): nid
                 for nid in node_ids
             }

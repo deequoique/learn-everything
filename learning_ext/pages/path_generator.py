@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Optional
 
 import gradio as gr
@@ -18,7 +19,9 @@ from learning_ext.db.models import KnowledgeNode, LearningProject
 from learning_ext.path_generator import (
     audit_existing_roadmap,
     audit_and_rewrite_roadmap,
+    export_roadmap_bundle,
     generate_roadmap,
+    import_roadmap_bundle,
     load_roadmap,
     refine_roadmap,
     replace_project_roadmap,
@@ -122,6 +125,22 @@ class PathGeneratorPage(BasePage):
             self.refresh_btn = gr.Button("🔄 刷新项目列表")
             self.load_project_id = gr.Number(label="加载项目 ID", value=0, precision=0)
             self.load_btn = gr.Button("📂 加载该项目路线")
+        with gr.Accordion("📦 导入 / 导出学习路线", open=False):
+            gr.Markdown(
+                "导出会生成格式化 JSON 文件，包含项目元信息和完整路线；导入会新建一个学习项目。"
+            )
+            with gr.Row():
+                self.export_project_id = gr.Number(
+                    label="导出项目 ID", value=0, precision=0
+                )
+                self.export_roadmap_btn = gr.Button("📤 导出学习路线")
+            self.export_roadmap_file = gr.File(
+                label="下载导出的学习路线 JSON", interactive=False
+            )
+            self.import_roadmap_file = gr.File(
+                label="导入学习路线 JSON", file_types=[".json"]
+            )
+            self.import_roadmap_btn = gr.Button("📥 导入学习路线", variant="primary")
         with gr.Accordion("🧭 批量审计旧路线", open=False):
             gr.Markdown(
                 "对已有项目执行路线完整性审计。系统会自动重写路线，并按新路线批量重新生成课程内容。"
@@ -205,6 +224,22 @@ class PathGeneratorPage(BasePage):
             fn=self._handle_load,
             inputs=[self.load_project_id],
             outputs=[
+                self.roadmap_output,
+                self.roadmap_json,
+                self.current_project_id,
+                self.status,
+            ],
+        )
+        self.export_roadmap_btn.click(
+            fn=self._handle_export_roadmap,
+            inputs=[self.export_project_id],
+            outputs=[self.export_roadmap_file, self.status],
+        )
+        self.import_roadmap_btn.click(
+            fn=self._handle_import_roadmap,
+            inputs=[self.import_roadmap_file],
+            outputs=[
+                self.project_list,
                 self.roadmap_output,
                 self.roadmap_json,
                 self.current_project_id,
@@ -338,6 +373,7 @@ class PathGeneratorPage(BasePage):
             )
         except Exception as e:
             logger.exception("环境清单生成失败")
+            env_md = ""
             progress_md += f"⚠️ 环境清单生成失败（不影响学习）: {e}\n\n"
             yield pid, progress_md + "⏳ 正在搜集知识点资料...", ""
 
@@ -370,14 +406,25 @@ class PathGeneratorPage(BasePage):
                 f"(剩余节点将在后台继续生成)\n\n"
             )
             yield pid, cur_md, ""
-            ok = generate_node_summary_to_db(nid, topic or "")
+            ok = generate_node_summary_to_db(
+                nid,
+                topic or "",
+                learning_goal=goal or "",
+                environment_context=env_md,
+            )
             if ok:
                 pre_done += 1
 
         # 3b. 剩余节点启动后台线程生成 (不阻塞 UI)
         remaining_ids = ordered_ids[PRE_GEN_COUNT:]
         if remaining_ids:
-            generate_summaries_background(pid, topic or "", remaining_ids)
+            generate_summaries_background(
+                pid,
+                topic or "",
+                remaining_ids,
+                learning_goal=goal or "",
+                environment_context=env_md,
+            )
             bg_note = f"，剩余 {len(remaining_ids)} 节后台生成中"
         else:
             bg_note = ""
@@ -412,6 +459,44 @@ class PathGeneratorPage(BasePage):
         except Exception as e:
             logger.exception("加载项目失败")
             return "", "{}", None, f"❌ 加载失败: {e}"
+
+    def _handle_export_roadmap(self, project_id):
+        """导出项目学习路线为格式化 JSON 文件。"""
+        if not project_id or int(project_id) <= 0:
+            return None, "⚠️ 请输入有效的项目 ID"
+        try:
+            with Session(engine) as session:
+                payload = export_roadmap_bundle(session, int(project_id))
+            export_dir = Path(".tmp") / "roadmap_exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            path = export_dir / f"learning_route_{int(project_id)}.json"
+            path.write_text(payload, encoding="utf-8")
+            return str(path), f"✅ 已导出项目 #{int(project_id)} 的学习路线"
+        except Exception as e:
+            logger.exception("导出学习路线失败")
+            return None, f"❌ 导出失败: {e}"
+
+    def _handle_import_roadmap(self, file_obj):
+        """导入格式化学习路线 JSON，创建新项目。"""
+        if file_obj is None:
+            return self._refresh_projects(), gr.update(), gr.update(), None, "⚠️ 请先选择 JSON 文件"
+        try:
+            path = getattr(file_obj, "name", None) or str(file_obj)
+            payload = Path(path).read_text(encoding="utf-8")
+            with Session(engine) as session:
+                project = import_roadmap_bundle(session, payload, user_id="default")
+                roadmap = load_roadmap(session, project.id)
+                md = self._roadmap_to_markdown(roadmap)
+                return (
+                    self._refresh_projects(),
+                    md,
+                    json.dumps(roadmap, ensure_ascii=False, indent=2),
+                    project.id,
+                    f"✅ 已导入学习路线并创建项目 #{project.id}",
+                )
+        except Exception as e:
+            logger.exception("导入学习路线失败")
+            return self._refresh_projects(), gr.update(), gr.update(), None, f"❌ 导入失败: {e}"
 
     def _handle_delete_project(self, project_id, confirm):
         """删除项目及其学习数据"""

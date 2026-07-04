@@ -192,7 +192,7 @@ class TestContentGenerationQueue:
         monkeypatch.setattr(
             study,
             "generate_node_summary",
-            lambda node, topic: (
+            lambda node, topic, **kwargs: (
                 "## 新导览\n"
                 + "这是强制重新生成后的完整课程正文。" * 60
                 + "\n\n## 新练习\n- 复习新内容。"
@@ -246,6 +246,51 @@ class TestContentGenerationQueue:
         assert result["queued"] == len(nodes)
         assert captured["force"] is True
         assert captured["node_ids"] == [n.id for n in nodes]
+
+    def test_generate_summary_prompt_requires_real_environment_practice(
+        self, monkeypatch
+    ):
+        import learning_ext.progress.study as study
+
+        captured = {}
+
+        def fake_chat(prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["system"] = kwargs.get("system", "")
+            return "## 本节导览\n真实课程内容"
+
+        monkeypatch.setattr(study, "chat", fake_chat)
+        node = KnowledgeNode(
+            project_id=1,
+            code="1.1",
+            title="LM Studio 与 Ollama 本地模型调用",
+            description="配置环境后，用本地大模型完成一段课程相关问答代码。",
+            stage="base",
+            est_hours=2,
+            difficulty=2,
+        )
+
+        study.generate_node_summary(
+            node,
+            "学习 LM Studio 和 Ollama 本地大模型开发",
+            learning_goal="能写出一个本地 AI 助手原型",
+            environment_context=(
+                "## 需要安装的软件\n"
+                "- LM Studio：启动 OpenAI Compatible Server\n"
+                "- Ollama：运行 `ollama serve` 和 `ollama pull llama3.1`\n"
+            ),
+        )
+
+        prompt = captured["prompt"]
+        assert "能写出一个本地 AI 助手原型" in prompt
+        assert "环境配置" in prompt
+        assert "真实可运行" in prompt
+        assert "LM Studio" in prompt
+        assert "Ollama" in prompt
+        assert "http://localhost:1234/v1" in prompt
+        assert "http://localhost:11434" in prompt
+        assert "不得只写 1+1" in prompt
+        assert "必须围绕本节课程内容" in prompt
 
 
 class TestEnvChecklist:

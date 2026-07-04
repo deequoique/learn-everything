@@ -54,6 +54,18 @@ class TestPathGeneratorPageLogic:
     def test_refresh_projects_returns_list(self, path_page):
         assert isinstance(path_page._refresh_projects(), list)
 
+    def test_path_page_exposes_route_import_export_controls(self):
+        from learning_ext.pages.path_generator import PathGeneratorPage
+
+        ui_source = inspect.getsource(PathGeneratorPage.on_building_ui)
+        event_source = inspect.getsource(PathGeneratorPage.on_register_events)
+
+        assert "导出学习路线" in ui_source
+        assert "导入学习路线" in ui_source
+        assert "gr.File" in ui_source
+        assert "_handle_export_roadmap" in event_source
+        assert "_handle_import_roadmap" in event_source
+
 
 class TestSaveWithSetup:
     def test_save_empty_roadmap(self, path_page):
@@ -113,6 +125,16 @@ class TestLearningAppEventRegistration:
         app.on_register_events()
 
         assert calls == []
+
+    def test_learning_app_removes_login_page_and_signout_event(self):
+        from learning_ext.app import LearningApp
+
+        source = inspect.getsource(LearningApp)
+
+        assert "LoginPage" not in source
+        assert "login-tab" not in source
+        assert "self.login_page" not in source
+        assert "onSignOut" not in source
 
 
 class TestStudyWorkbenchPageLogic:

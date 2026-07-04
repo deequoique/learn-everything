@@ -292,7 +292,7 @@ class LearningApp(KotaemonApp):
 
     """带学习特化功能的 Kotaemon App"""
 
-    public_events = ["onSignOut"]
+    public_events = []
 
     def __init__(self):
         super().__init__()
@@ -461,7 +461,6 @@ class LearningApp(KotaemonApp):
         """重写 UI：精简 Tab 为中文 + 极简配置页替换复杂 Resources 页"""
         from ktem.pages.help import HelpPage
         from ktem.pages.setup import SetupPage
-        from ktem.pages.login import LoginPage
         from ktem.pages.chat import ChatPage
 
         KH_ENABLE_FIRST_SETUP_local = getattr(
@@ -476,13 +475,7 @@ class LearningApp(KotaemonApp):
         with gr.Tabs() as self.tabs:
             self._inject_css()
 
-            if self.f_user_management:
-                with gr.Tab("欢迎", elem_id="login-tab", id="login-tab") as self._tabs[
-                    "login-tab"
-                ]:
-                    self.login_page = LoginPage(self)
-
-            vis = not self.f_user_management
+            vis = True
 
             # 1. 使用指南 (最先)
             self._build_guide_tab(visible=vis)

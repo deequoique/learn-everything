@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -26,6 +27,9 @@ from learning_ext.path_generator.prompts import (
     USER_TEMPLATE,
 )
 from learning_ext.project_ops import clear_project_learning_data
+
+ROADMAP_BUNDLE_KIND = "learn-everything.roadmap"
+ROADMAP_BUNDLE_SCHEMA_VERSION = 1
 
 
 def generate_roadmap(
@@ -233,6 +237,65 @@ def save_roadmap(
     return project
 
 
+def export_roadmap_bundle(session: Session, project_id: int) -> str:
+    """Export a formatted, self-contained learning route JSON bundle."""
+    project = session.get(LearningProject, int(project_id))
+    if project is None:
+        raise ValueError(f"Project {project_id} not found")
+
+    roadmap = load_roadmap(session, project.id)
+    payload = {
+        "kind": ROADMAP_BUNDLE_KIND,
+        "schema_version": ROADMAP_BUNDLE_SCHEMA_VERSION,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "project": {
+            "title": project.title,
+            "topic": project.topic,
+            "background": project.background,
+            "goal": project.goal,
+            "weekly_hours": project.weekly_hours,
+            "status": project.status,
+        },
+        "roadmap": roadmap,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def import_roadmap_bundle(
+    session: Session, payload: str | dict, *, user_id: str = "default"
+) -> LearningProject:
+    """Import a route bundle or raw roadmap JSON as a new learning project."""
+    if isinstance(payload, str):
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"学习路线 JSON 解析失败: {e}") from e
+    elif isinstance(payload, dict):
+        data = payload
+    else:
+        raise ValueError("学习路线导入内容必须是 JSON 字符串或对象")
+
+    if data.get("kind") == ROADMAP_BUNDLE_KIND:
+        project_data = data.get("project") or {}
+        roadmap = data.get("roadmap") or {}
+    else:
+        project_data = {}
+        roadmap = data
+
+    _validate_roadmap_for_exchange(roadmap)
+    topic = str(project_data.get("topic") or roadmap.get("summary") or "导入的学习路线")
+    return save_roadmap(
+        session=session,
+        user_id=user_id,
+        topic=topic,
+        background=str(project_data.get("background") or ""),
+        goal=str(project_data.get("goal") or ""),
+        weekly_hours=float(project_data.get("weekly_hours") or 10.0),
+        roadmap=roadmap,
+        title=str(project_data.get("title") or roadmap.get("summary") or topic),
+    )
+
+
 def replace_project_roadmap(
     session: Session,
     project_id: int,
@@ -337,3 +400,26 @@ def _distinct_stages(nodes):
         if n.stage not in [s["stage"] for s in seen]:
             seen.append({"name": n.stage, "stage": n.stage, "goal": ""})
     return seen
+
+
+def _validate_roadmap_for_exchange(roadmap: dict) -> None:
+    if not isinstance(roadmap, dict):
+        raise ValueError("学习路线必须是 JSON 对象")
+    nodes = roadmap.get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        raise ValueError("学习路线缺少 nodes")
+    codes = set()
+    for idx, node in enumerate(nodes, start=1):
+        if not isinstance(node, dict):
+            raise ValueError(f"第 {idx} 个节点不是对象")
+        for key in ("code", "title"):
+            if not str(node.get(key) or "").strip():
+                raise ValueError(f"第 {idx} 个节点缺少 {key}")
+        code = str(node["code"])
+        if code in codes:
+            raise ValueError(f"节点编号重复: {code}")
+        codes.add(code)
+    for node in nodes:
+        for prereq in node.get("prerequisites", []) or []:
+            if prereq not in codes:
+                raise ValueError(f"节点 {node.get('code')} 引用了不存在的前置节点 {prereq}")

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from sqlmodel import select
 
 from learning_ext.db.models import KnowledgeEdge, KnowledgeNode, LearningProject
 from learning_ext.path_generator import (
+    export_roadmap_bundle,
     generate_roadmap,
+    import_roadmap_bundle,
     load_roadmap,
     refine_roadmap,
     save_roadmap,
@@ -196,6 +200,52 @@ class TestLoadRoadmap:
     def test_load_nonexistent_raises(self, session):
         with pytest.raises(ValueError, match="not found"):
             load_roadmap(session, 99999)
+
+
+class TestRoadmapImportExport:
+    def test_export_bundle_is_formatted_and_importable(self, session, mock_llm):
+        roadmap = generate_roadmap("LM Studio 实战", "会 Python", "做本地 AI 助手", 8)
+        project = save_roadmap(
+            session,
+            user_id="default",
+            topic="LM Studio 实战",
+            background="会 Python",
+            goal="做本地 AI 助手",
+            weekly_hours=8,
+            roadmap=roadmap,
+        )
+
+        payload = export_roadmap_bundle(session, project.id)
+        data = json.loads(payload)
+
+        assert payload.endswith("\n")
+        assert data["kind"] == "learn-everything.roadmap"
+        assert data["schema_version"] == 1
+        assert data["project"]["topic"] == "LM Studio 实战"
+        assert data["project"]["goal"] == "做本地 AI 助手"
+        assert data["roadmap"]["nodes"][0]["code"] == "1.1"
+
+        imported = import_roadmap_bundle(session, payload, user_id="default")
+        assert imported.id != project.id
+        assert imported.topic == "LM Studio 实战"
+        imported_roadmap = load_roadmap(session, imported.id)
+        assert [n["code"] for n in imported_roadmap["nodes"]] == [
+            n["code"] for n in roadmap["nodes"]
+        ]
+
+    def test_import_bundle_rejects_malformed_route(self, session):
+        with pytest.raises(ValueError, match="nodes"):
+            import_roadmap_bundle(
+                session,
+                json.dumps(
+                    {
+                        "kind": "learn-everything.roadmap",
+                        "schema_version": 1,
+                        "project": {"topic": "坏数据"},
+                        "roadmap": {"summary": "坏数据"},
+                    }
+                ),
+            )
 
 
 class TestRefineRoadmap:
