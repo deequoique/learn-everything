@@ -19,6 +19,7 @@ from learning_ext.db.models import (
     ReviewLog,
 )
 from learning_ext.progress.service import get_project_overview
+from learning_ext.progress.study import sort_nodes_by_code
 
 
 def export_anki_apkg(session: Session, project_id: int) -> bytes:
@@ -59,10 +60,9 @@ def export_markdown(session: Session, project_id: int) -> str:
         raise ValueError(f"Project {project_id} not found")
 
     nodes = session.exec(
-        select(KnowledgeNode)
-        .where(KnowledgeNode.project_id == project_id)
-        .order_by(KnowledgeNode.code)
+        select(KnowledgeNode).where(KnowledgeNode.project_id == project_id)
     ).all()
+    nodes = sort_nodes_by_code(list(nodes))
     cards = session.exec(select(Card).where(Card.project_id == project_id)).all()
 
     md = f"# {project.title}\n\n"
@@ -115,10 +115,9 @@ def export_progress_report(session: Session, project_id: int) -> str:
         raise ValueError(f"Project {project_id} not found")
 
     nodes = session.exec(
-        select(KnowledgeNode)
-        .where(KnowledgeNode.project_id == project_id)
-        .order_by(KnowledgeNode.code)
+        select(KnowledgeNode).where(KnowledgeNode.project_id == project_id)
     ).all()
+    nodes = sort_nodes_by_code(list(nodes))
     overview = get_project_overview(session, project_id)
 
     html = f"""<!DOCTYPE html>

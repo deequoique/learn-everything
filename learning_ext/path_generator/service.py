@@ -26,6 +26,7 @@ from learning_ext.path_generator.prompts import (
     SYSTEM,
     USER_TEMPLATE,
 )
+from learning_ext.progress.study import course_code_sort_key
 from learning_ext.project_ops import clear_project_learning_data
 
 ROADMAP_BUNDLE_KIND = "learn-everything.roadmap"
@@ -389,7 +390,7 @@ def load_roadmap(session: Session, project_id: int) -> dict:
                 "mastery": n.mastery,
                 "status": n.status,
             }
-            for n in sorted(nodes, key=lambda x: x.code)
+            for n in sorted(nodes, key=lambda x: course_code_sort_key(x.code))
         ],
     }
 

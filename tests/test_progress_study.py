@@ -151,6 +151,79 @@ class TestGetProjectProgress:
 
 
 class TestContentGenerationQueue:
+    def test_course_code_sort_key_orders_decimal_codes_numerically(self):
+        from learning_ext.progress.study import course_code_sort_key
+
+        codes = ["2.1", "2.10", "2.2", "1.9", "1.10", "附录"]
+
+        assert sorted(codes, key=course_code_sort_key) == [
+            "1.9",
+            "1.10",
+            "2.1",
+            "2.2",
+            "2.10",
+            "附录",
+        ]
+
+    def test_audit_node_outline_sorts_decimal_codes_numerically(self):
+        from learning_ext.progress.audit import _node_outline
+
+        nodes = [
+            KnowledgeNode(
+                project_id=1,
+                code="2.10",
+                title="Two ten",
+                stage="strengthen",
+                est_hours=1,
+                difficulty=2,
+            ),
+            KnowledgeNode(
+                project_id=1,
+                code="2.1",
+                title="Two one",
+                stage="strengthen",
+                est_hours=1,
+                difficulty=2,
+            ),
+            KnowledgeNode(
+                project_id=1,
+                code="2.2",
+                title="Two two",
+                stage="strengthen",
+                est_hours=1,
+                difficulty=2,
+            ),
+        ]
+
+        outline = _node_outline(nodes)
+
+        assert outline.index("[2.1]") < outline.index("[2.2]") < outline.index("[2.10]")
+
+    def test_get_nodes_without_content_uses_numeric_code_order(
+        self, session, sample_project
+    ):
+        nodes = session.exec(
+            select(KnowledgeNode).where(KnowledgeNode.project_id == sample_project.id)
+        ).all()
+        for node in nodes:
+            session.delete(node)
+        session.commit()
+        for code in ["2.10", "2.1", "2.2"]:
+            session.add(
+                KnowledgeNode(
+                    project_id=sample_project.id,
+                    code=code,
+                    title=f"课程 {code}",
+                    description="短说明",
+                    stage="strengthen",
+                )
+            )
+        session.commit()
+
+        pending = get_nodes_without_content(session, sample_project.id, limit=10)
+
+        assert [node.code for node in pending] == ["2.1", "2.2", "2.10"]
+
     def test_get_nodes_without_content_uses_validity_check(
         self, session, sample_project
     ):
@@ -291,6 +364,94 @@ class TestContentGenerationQueue:
         assert "http://localhost:11434" in prompt
         assert "不得只写 1+1" in prompt
         assert "必须围绕本节课程内容" in prompt
+
+    def test_practice_heavy_detection_flags_finetuning_lessons(self):
+        from learning_ext.progress.study import is_practice_heavy_node
+
+        node = KnowledgeNode(
+            project_id=1,
+            code="2.10",
+            title="模型微调实操",
+            description="使用数据集完成一次 LoRA fine-tune。",
+            stage="strengthen",
+            est_hours=2,
+            difficulty=3,
+        )
+
+        assert is_practice_heavy_node(node, "学习 LLM Agent") is True
+
+    def test_generate_practice_lesson_to_db_creates_practice_task(
+        self, session, sample_project, monkeypatch
+    ):
+        import ktem.db.engine as db_engine
+        import learning_ext.progress.study as study
+
+        monkeypatch.setattr(db_engine, "engine", session.get_bind())
+        node = session.exec(select(KnowledgeNode)).first()
+        node.title = "模型微调"
+        node.difficulty = 4
+        session.add(node)
+        session.commit()
+
+        monkeypatch.setattr(
+            study,
+            "generate_practice_lesson",
+            lambda node, topic, **kwargs: (
+                "## 实操目标\n完成一次微调。\n\n"
+                "```bash\npython train.py\n```\n\n"
+                "## 验收标准\n看到模型保存。"
+            ),
+        )
+
+        assert study.generate_practice_lesson_to_db(node.id, sample_project.topic)
+
+        task = session.exec(
+            select(Task)
+            .where(Task.node_id == node.id)
+            .where(Task.task_type == "practice")
+        ).first()
+        assert task is not None
+        assert task.title == f"🧪 实操课程：{node.title}"
+        assert "python train.py" in task.description
+
+    def test_generate_node_summary_to_db_auto_creates_practice_for_heavy_node(
+        self, session, sample_project, monkeypatch
+    ):
+        import ktem.db.engine as db_engine
+        import learning_ext.progress.study as study
+
+        monkeypatch.setattr(db_engine, "engine", session.get_bind())
+        node = session.exec(select(KnowledgeNode)).first()
+        node.title = "模型微调流程"
+        node.difficulty = 4
+        node.description = "短说明"
+        session.add(node)
+        session.commit()
+
+        monkeypatch.setattr(
+            study,
+            "generate_node_summary",
+            lambda node, topic, **kwargs: (
+                "## 本节导览\n"
+                + "完整教学内容。" * 80
+                + "\n\n## 自测练习\n- 解释微调。"
+            ),
+        )
+        monkeypatch.setattr(
+            study,
+            "generate_practice_lesson",
+            lambda node, topic, **kwargs: "## 完整微调流程\n```python\nprint('train')\n```",
+        )
+
+        assert study.generate_node_summary_to_db(node.id, sample_project.topic)
+
+        task = session.exec(
+            select(Task)
+            .where(Task.node_id == node.id)
+            .where(Task.task_type == "practice")
+        ).first()
+        assert task is not None
+        assert "完整微调流程" in task.description
 
 
 class TestEnvChecklist:

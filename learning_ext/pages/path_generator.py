@@ -27,6 +27,7 @@ from learning_ext.path_generator import (
     replace_project_roadmap,
     save_roadmap,
 )
+from learning_ext.progress.study import course_code_sort_key, sort_nodes_by_code
 
 logger = logging.getLogger(__name__)
 
@@ -391,10 +392,9 @@ class PathGeneratorPage(BasePage):
         # 查出所有节点 id (按 code 排序)
         with Session(engine) as session:
             db_nodes = session.exec(
-                select(KnowledgeNode)
-                .where(KnowledgeNode.project_id == pid)
-                .order_by(KnowledgeNode.code)
+                select(KnowledgeNode).where(KnowledgeNode.project_id == pid)
             ).all()
+            db_nodes = sort_nodes_by_code(list(db_nodes))
             ordered_ids = [n.id for n in db_nodes]
 
         # 3a. 串行生成前 PRE_GEN_COUNT 节 (用户立即可见)
@@ -737,7 +737,9 @@ class PathGeneratorPage(BasePage):
             if not nodes:
                 continue
             lines.append(f"## {stage_names.get(stage_key, stage_key)}\n")
-            for node in sorted(nodes, key=lambda x: x["code"]):
+            for node in sorted(
+                nodes, key=lambda x: course_code_sort_key(x.get("code", ""))
+            ):
                 mastery_pct = ""
                 if "mastery" in node:
                     mastery_pct = f" _(掌握 {node['mastery']:.0%})_"

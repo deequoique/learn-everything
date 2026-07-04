@@ -9,11 +9,12 @@ from sqlmodel import Session, select
 from learning_ext.db.models import KnowledgeEdge, KnowledgeNode, LearningProject
 from learning_ext.llm import chat
 from learning_ext.notes import get_resources
+from learning_ext.progress.study import course_code_sort_key
 
 
 def _node_outline(nodes: Iterable[KnowledgeNode]) -> str:
     lines = []
-    for node in sorted(nodes, key=lambda n: n.code):
+    for node in sorted(nodes, key=lambda n: course_code_sort_key(n.code)):
         desc = (node.description or "").strip().replace("\n", " ")
         if len(desc) > 180:
             desc = desc[:180] + "..."

@@ -40,11 +40,14 @@ from learning_ext.progress.study import (
     STATUS_PENDING,
     STATUS_SKIPPED,
     generate_node_summary_to_db,
+    generate_practice_lesson_to_db,
     generate_summaries_background,
+    get_practice_task,
     get_next_learnable_nodes,
     get_nodes_without_content,
     get_project_progress,
     is_content_valid,
+    sort_nodes_by_code,
     regenerate_all_content,
     set_node_status,
 )
@@ -299,6 +302,19 @@ class StudyWorkbenchPage(BasePage):
                                 "*点击「审计本节完整性」，让 AI 检查本节是否讲全、讲深、是否需要拆分或补充。*"
                             )
 
+                    with gr.TabItem("🧪 实操课程", elem_id="le-practice-zone"):
+                        gr.Markdown(
+                            "> 高难度或偏实操课程会自动生成流程、代码、验收标准和排错清单。"
+                        )
+                        with gr.Row():
+                            self.gen_practice_btn = gr.Button(
+                                "🧪 生成实操课程", size="sm"
+                            )
+                            self.gen_practice_status = gr.Markdown("")
+                        self.practice_md = gr.Markdown(
+                            "*本节暂无实操课程。高难/实操内容会自动生成，也可以点击按钮手动生成。*"
+                        )
+
                     with gr.TabItem("📝 我的笔记", elem_id="le-note-zone"):
                         gr.Markdown(
                             "> 记录笔记, 会自动保存到当前知识点。支持 Markdown。"
@@ -419,6 +435,7 @@ class StudyWorkbenchPage(BasePage):
             self.current_node_id,
             self.node_header,
             self.node_guide,
+            self.practice_md,
             self.note_input,
             self.resources_md,
             self.chatbot,
@@ -474,6 +491,13 @@ class StudyWorkbenchPage(BasePage):
             fn=self._save_note,
             inputs=[self.current_node_id, self.current_project_id, self.note_input],
             outputs=[self.note_status],
+        )
+
+        # 实操课程
+        self.gen_practice_btn.click(
+            fn=self._gen_practice_lesson,
+            inputs=[self.current_node_id, self.current_project_id],
+            outputs=[self.practice_md, self.gen_practice_status],
         )
 
         # 参考资料
@@ -583,10 +607,11 @@ class StudyWorkbenchPage(BasePage):
             self.current_node_id,  # 5: 预加载的节点 id
             self.node_header,  # 6: 节点标题
             self.node_guide,  # 7: 教学内容
-            self.note_input,  # 8: 笔记
-            self.resources_md,  # 9: 参考资料
-            self.chatbot,  # 10
-            self._chat_history,  # 11
+            self.practice_md,  # 8: 实操课程
+            self.note_input,  # 9: 笔记
+            self.resources_md,  # 10: 参考资料
+            self.chatbot,  # 11
+            self._chat_history,  # 12
         ]
         try:
             self._app.app.load(
@@ -616,12 +641,11 @@ class StudyWorkbenchPage(BasePage):
         nodes = session.exec(
             select(KnowledgeNode)
             .where(KnowledgeNode.project_id == pid)
-            .order_by(KnowledgeNode.code)
         ).all()
         learnable_ids = {n.id for n in get_next_learnable_nodes(session, pid, limit=50)}
         done_statuses = {STATUS_MASTERED, STATUS_SKIPPED}
         result = []
-        for n in nodes:
+        for n in sort_nodes_by_code(list(nodes)):
             result.append(
                 {
                     "id": n.id,
@@ -701,6 +725,11 @@ class StudyWorkbenchPage(BasePage):
             lines.append("\n---")
         return "\n".join(lines)
 
+    def _render_practice_md(self, task):
+        if not task or not task.description:
+            return "*本节暂无实操课程。高难/实操内容会自动生成，也可以点击「🧪 生成实操课程」。*"
+        return task.description
+
     # ---- 自动初始化 (页面加载时执行, 预加载第一节内容) ----
     def _auto_init(self):
         """页面加载后: 填充项目/课程下拉框 + 预加载第一个可学节点的教学内容。"""
@@ -719,6 +748,7 @@ class StudyWorkbenchPage(BasePage):
                         None,
                         "*请先创建学习路线*",
                         "",
+                        "*本节暂无实操课程。*",
                         "",
                         "*点「拉取并总结资料」生成学习汇报*",
                         [],
@@ -739,6 +769,7 @@ class StudyWorkbenchPage(BasePage):
                 first_node_id = None
                 header = "*选择课程开始学习*"
                 guide = ""
+                practice_md = "*本节暂无实操课程。*"
                 note_content = ""
                 res_md = "*点「拉取并总结资料」生成学习汇报*"
                 if nodes_data:
@@ -752,11 +783,18 @@ class StudyWorkbenchPage(BasePage):
                             first_node_id, proj.topic if proj else "", node.description
                         )
                         guide = self._truncate_guide(guide)
+                        practice_md = self._render_practice_md(
+                            get_practice_task(s, first_node_id)
+                        )
                         note = get_note(s, first_node_id)
                         note_content = note.content if note else ""
                         resources = get_resources(s, first_node_id)
                         if resources:
                             res_md = self._render_resources_md(resources)
+                        else:
+                            res_md = self._ensure_resources_background(
+                                first_node_id, pid
+                            )
                 # 选中第一个节点
                 course_update = gr.update(
                     choices=course_c,
@@ -776,10 +814,11 @@ class StudyWorkbenchPage(BasePage):
                     first_node_id,  # 5: current_node_id
                     header,  # 6: 节点标题
                     guide,  # 7: 教学内容
-                    note_content,  # 8: 笔记
-                    res_md,  # 9: 参考资料
-                    [],  # 10: chatbot
-                    [],  # 11: chat history
+                    practice_md,  # 8: 实操课程
+                    note_content,  # 9: 笔记
+                    res_md,  # 10: 参考资料
+                    [],  # 11: chatbot
+                    [],  # 12: chat history
                 ]
         except Exception as e:
             logger.exception("_auto_init 失败")
@@ -792,6 +831,7 @@ class StudyWorkbenchPage(BasePage):
                 None,
                 "*加载失败*",
                 "",
+                "*本节暂无实操课程。*",
                 "",
                 "*点「拉取并总结资料」生成学习汇报*",
                 [],
@@ -918,6 +958,7 @@ class StudyWorkbenchPage(BasePage):
                 None,
                 "*请先在下拉框中选择一节课，再点「查看课程」*",
                 "",
+                "*本节暂无实操课程。*",
                 "",
                 "*点「拉取并总结资料」生成学习汇报*",
                 [],
@@ -926,22 +967,24 @@ class StudyWorkbenchPage(BasePage):
         try:
             nid = int(node_id)
         except (ValueError, TypeError):
-            return None, "*ID无效*", "", "", "*点击生成*", [], []
+            return None, "*ID无效*", "", "*本节暂无实操课程。*", "", "*点击生成*", [], []
 
         with Session(engine) as session:
             node = session.get(KnowledgeNode, nid)
             if not node:
-                return None, "*知识点不存在*", "", "", "*点击生成*", [], []
+                return None, "*知识点不存在*", "", "*本节暂无实操课程。*", "", "*点击生成*", [], []
             proj = session.get(LearningProject, node.project_id)
             header = self._build_node_header(node, proj)
             guide = node.description or ""
+            practice = get_practice_task(session, nid)
+            practice_md = self._render_practice_md(practice)
             note = get_note(session, nid)
             note_content = note.content if note else ""
             resources = get_resources(session, nid)
             res_md = (
                 self._render_resources_md(resources)
                 if resources
-                else "*点「拉取并总结资料」生成学习汇报*"
+                else self._ensure_resources_background(nid, node.project_id)
             )
             topic = proj.topic if proj else ""
 
@@ -953,11 +996,11 @@ class StudyWorkbenchPage(BasePage):
         guide = self._truncate_guide(guide)
         logger.info(f"[工作台] 返回内容, guide长度={len(guide)}")
 
-        return nid, header, guide, note_content, res_md, [], []
+        return nid, header, guide, practice_md, note_content, res_md, [], []
 
     def _on_course_change(self, node_id):
         if not node_id or node_id == "__stage__":
-            return tuple(gr.update() for _ in range(7))
+            return tuple(gr.update() for _ in range(8))
         return self._on_node_select(node_id)
 
     def _ensure_course_content(self, node_id: int, topic: str, guide: str | None) -> str:
@@ -1015,7 +1058,60 @@ class StudyWorkbenchPage(BasePage):
         except Exception as e:
             return f"❌ {e}"
 
+    # ---- 实操课程 ----
+    def _gen_practice_lesson(self, node_id, project_id):
+        if not node_id:
+            return "*请先选择知识点*", "⚠️ 请先选择知识点"
+        try:
+            with Session(engine) as s:
+                node = s.get(KnowledgeNode, int(node_id))
+                proj = s.get(LearningProject, int(project_id)) if project_id else None
+                topic = proj.topic if proj else ""
+            ok = generate_practice_lesson_to_db(int(node_id), topic, force=True)
+            if not ok:
+                return "*生成失败，请稍后重试。*", "❌ 生成失败"
+            with Session(engine) as s:
+                task = get_practice_task(s, int(node_id))
+            return self._render_practice_md(task), "✅ 已生成实操课程"
+        except Exception as e:
+            return f"*生成失败: {e}*", f"❌ {e}"
+
     # ---- 参考资料 ----
+    def _ensure_resources_background(self, node_id, project_id):
+        if not node_id or not project_id:
+            return "*点「拉取并总结资料」生成学习汇报*"
+        try:
+            with Session(engine) as s:
+                existing = get_resources(s, int(node_id))
+                if existing:
+                    return self._render_resources_md(existing)
+        except Exception:
+            return "*点「拉取并总结资料」生成学习汇报*"
+
+        import threading
+
+        def _worker():
+            try:
+                with Session(engine) as s:
+                    node = s.get(KnowledgeNode, int(node_id))
+                    proj = (
+                        s.get(LearningProject, int(project_id)) if project_id else None
+                    )
+                    if not node:
+                        return
+                    topic = proj.topic if proj else ""
+                    items = generate_resources(node, topic)
+                    save_resources_to_db(s, int(node_id), int(project_id), items)
+            except Exception as e:
+                logger.warning(f"自动拉取参考资料失败 (node {node_id}): {e}")
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name=f"le-resources-{node_id}",
+        ).start()
+        return "⏳ 正在自动拉取参考资料，稍后刷新本节即可查看。"
+
     def _gen_resources(self, node_id, project_id):
         """生成参考资料 (普通函数, 接受同步等待)。"""
         if not node_id:

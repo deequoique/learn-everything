@@ -27,7 +27,7 @@ from learning_ext.db.models import (
     ReviewLog,
     Task,
 )
-from learning_ext.exporter import export_markdown
+from learning_ext.exporter import export_markdown, export_progress_report
 from learning_ext.fsrs_review import (
     RATING_AGAIN,
     RATING_EASY,
@@ -297,6 +297,62 @@ class TestExport:
         session.commit()
         report = export_markdown(session, sample_project.id)
         assert "Q" in report  # 卡片内容应在报告中
+
+    def test_exports_sort_decimal_course_codes_numerically(self, session):
+        roadmap = {
+            "summary": "Decimal export order",
+            "stages": [{"name": "Strengthen", "stage": "strengthen", "goal": ""}],
+            "nodes": [
+                {
+                    "code": "2.10",
+                    "title": "Two ten",
+                    "description": "Ten",
+                    "stage": "strengthen",
+                    "est_hours": 1,
+                    "difficulty": 2,
+                    "prerequisites": [],
+                },
+                {
+                    "code": "2.1",
+                    "title": "Two one",
+                    "description": "One",
+                    "stage": "strengthen",
+                    "est_hours": 1,
+                    "difficulty": 2,
+                    "prerequisites": [],
+                },
+                {
+                    "code": "2.2",
+                    "title": "Two two",
+                    "description": "Two",
+                    "stage": "strengthen",
+                    "est_hours": 1,
+                    "difficulty": 2,
+                    "prerequisites": [],
+                },
+            ],
+        }
+        project = save_roadmap(
+            session,
+            user_id="default",
+            topic="decimal order",
+            background="",
+            goal="",
+            weekly_hours=3,
+            roadmap=roadmap,
+        )
+
+        markdown = export_markdown(session, project.id)
+        html = export_progress_report(session, project.id)
+
+        assert (
+            markdown.index("[2.1]")
+            < markdown.index("[2.2]")
+            < markdown.index("[2.10]")
+        )
+        assert (
+            html.index("[2.1]") < html.index("[2.2]") < html.index("[2.10]")
+        )
 
 
 class TestAutoSetup:

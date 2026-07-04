@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import List, Optional
 
 from sqlmodel import Session, select
@@ -32,6 +33,40 @@ _VALID_STATUSES = {
     STATUS_WEAK,
     STATUS_SKIPPED,
 }
+
+PRACTICE_KEYWORDS = (
+    "微调",
+    "fine-tune",
+    "finetune",
+    "训练",
+    "部署",
+    "api",
+    "sdk",
+    "数据集",
+    "实操",
+    "实践",
+    "项目",
+    "推理",
+    "评估",
+    "代码",
+    "workflow",
+    "pipeline",
+)
+
+
+def course_code_sort_key(code: str) -> tuple:
+    """Sort course codes by numeric segments, e.g. 2.10 after 2.9."""
+    parts = re.split(r"([0-9]+)", str(code or ""))
+    key = []
+    for part in parts:
+        if part == "":
+            continue
+        key.append((0, int(part)) if part.isdigit() else (1, part.lower()))
+    return tuple(key)
+
+
+def sort_nodes_by_code(nodes: List[KnowledgeNode]) -> List[KnowledgeNode]:
+    return sorted(nodes, key=lambda node: course_code_sort_key(node.code))
 
 
 def set_node_status(session: Session, node_id: int, status: str) -> KnowledgeNode:
@@ -67,10 +102,11 @@ def get_next_learnable_nodes(
 
     learnable: List[KnowledgeNode] = []
     # 先取"学习中"的
-    learning = [n for n in nodes if n.status == STATUS_LEARNING]
+    ordered_nodes = sort_nodes_by_code(list(nodes))
+    learning = [n for n in ordered_nodes if n.status == STATUS_LEARNING]
     learnable.extend(learning)
     # 再取"待学且依赖已满足"的
-    for n in nodes:
+    for n in ordered_nodes:
         if n.status != STATUS_PENDING:
             continue
         prereqs = deps.get(n.id, [])
@@ -234,6 +270,172 @@ def generate_node_summary(
     )
 
 
+def is_practice_heavy_node(node: KnowledgeNode, project_topic: str = "") -> bool:
+    """Return whether a node deserves a separate practical lesson."""
+    if int(node.difficulty or 0) >= 4:
+        return True
+    if float(node.est_hours or 0) >= 3:
+        return True
+    haystack = " ".join(
+        [
+            project_topic or "",
+            node.title or "",
+            node.description or "",
+            node.stage or "",
+        ]
+    ).lower()
+    return any(keyword in haystack for keyword in PRACTICE_KEYWORDS)
+
+
+def get_practice_task(session: Session, node_id: int) -> Optional[Task]:
+    return session.exec(
+        select(Task)
+        .where(Task.node_id == node_id)
+        .where(Task.task_type == "practice")
+        .order_by(Task.id.desc())
+    ).first()
+
+
+def generate_practice_lesson(
+    node: KnowledgeNode,
+    project_topic: str,
+    *,
+    learning_goal: str = "",
+    environment_context: str = "",
+    model_name: Optional[str] = None,
+) -> str:
+    """Generate a separate hands-on lesson for a practice-heavy node."""
+    prompt = f"""你正在为「{project_topic}」课程的「{node.title} ({node.code})」编写一份**单独的实操课程**。
+
+这不是概念课件，而是学习者可以跟着一步一步做完的实操流程。
+
+【学习目标】{learning_goal or "完成一个能验证本知识点的真实小实验"}
+【难度】{node.difficulty}/5
+【建议学时】{node.est_hours} 小时
+【课程说明】
+{(node.description or "请根据标题和主题设计实操。")[:1800]}
+
+【环境上下文】
+{environment_context or "未提供环境清单。请给出最小可运行环境，并明确假设。"}
+
+请输出 Markdown，必须包含：
+
+## 实操目标
+- 本实操要完成什么可验证成果
+
+## 前置条件
+- 软件、账号、模型、数据、硬件、环境变量
+- 安装命令和版本建议
+
+## 项目目录结构
+用代码块给出目录树。
+
+## 完整流程
+按步骤写清楚，每一步包含目的、命令或代码、预期输出。
+
+## 关键代码
+给出可以复制运行的代码。若主题是模型微调，必须包含：
+- 数据集样例或数据格式
+- 训练脚本
+- 启动命令
+- 保存/加载模型
+- 简单评估或推理验证
+
+## 验收标准
+- 学习者如何判断自己做成了
+
+## 常见报错与排查
+- 至少 5 个具体错误、原因和修复方法
+
+## 延伸任务
+- 2-3 个进阶练习
+
+要求：
+1. 不要写占位符，不要说“按需替换”而不给例子。
+2. 代码和命令必须服务于当前课程，不要写玩具示例。
+3. 如果需要外部 API Key，要给出本地替代方案或 mock 方案。
+4. 直接输出 Markdown。"""
+    return chat(
+        prompt,
+        system="你是资深工程实践导师，会把抽象课程转成可执行项目、流程代码和验收标准。",
+        model_name=model_name,
+        temperature=0.35,
+        max_tokens=3500,
+    )
+
+
+def _save_practice_task(
+    session: Session, node: KnowledgeNode, content: str, *, force: bool = False
+) -> Task:
+    existing = get_practice_task(session, node.id)
+    if existing and not force:
+        return existing
+    if existing:
+        existing.description = content
+        existing.title = f"🧪 实操课程：{node.title}"
+        existing.status = "pending"
+        session.add(existing)
+        session.commit()
+        session.refresh(existing)
+        return existing
+    task = Task(
+        project_id=node.project_id,
+        node_id=node.id,
+        title=f"🧪 实操课程：{node.title}",
+        description=content,
+        task_type="practice",
+        status="pending",
+    )
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return task
+
+
+def generate_practice_lesson_to_db(
+    node_id: int,
+    project_topic: str,
+    *,
+    force: bool = False,
+    learning_goal: str = "",
+    environment_context: str = "",
+) -> bool:
+    """Generate and persist a practical lesson for a node."""
+    try:
+        from ktem.db.engine import engine as _engine
+
+        with Session(_engine) as session:
+            node = session.get(KnowledgeNode, node_id)
+            if not node:
+                return False
+            if get_practice_task(session, node.id) and not force:
+                return True
+            if not learning_goal or not environment_context:
+                project = session.get(LearningProject, node.project_id)
+                if project and not learning_goal:
+                    learning_goal = project.goal or ""
+                if not environment_context:
+                    env_task = session.exec(
+                        select(Task)
+                        .where(Task.project_id == node.project_id)
+                        .where(Task.task_type == "env")
+                        .order_by(Task.id.desc())
+                    ).first()
+                    if env_task:
+                        environment_context = env_task.description
+            content = generate_practice_lesson(
+                node,
+                project_topic,
+                learning_goal=learning_goal,
+                environment_context=environment_context,
+            )
+            _save_practice_task(session, node, content, force=force)
+            return True
+    except Exception as e:
+        logger.warning(f"生成实操课程失败 (node {node_id}): {e}")
+        return False
+
+
 def generate_env_checklist(
     project_topic: str,
     background: str = "",
@@ -318,10 +520,9 @@ def get_nodes_without_content(
     nodes = session.exec(
         select(KnowledgeNode)
         .where(KnowledgeNode.project_id == project_id)
-        .order_by(KnowledgeNode.code)
     ).all()
     result = []
-    for n in nodes:
+    for n in sort_nodes_by_code(list(nodes)):
         if not is_content_valid(n.description):
             result.append(n)
         if len(result) >= limit:
@@ -375,6 +576,16 @@ def generate_node_summary_to_db(
             node.description = summary
             s.add(node)
             s.commit()
+            if is_practice_heavy_node(node, project_topic):
+                try:
+                    generate_practice_lesson_to_db(
+                        node.id,
+                        project_topic,
+                        learning_goal=learning_goal,
+                        environment_context=environment_context,
+                    )
+                except Exception as e:
+                    logger.warning(f"自动生成实操课程失败 (node {node_id}): {e}")
         return True
     except Exception as e:
         logger.warning(f"后台生成教学内容失败 (node {node_id}): {e}")
@@ -474,8 +685,11 @@ def regenerate_all_content(
         stmt = select(KnowledgeNode)
         if project_id is not None:
             stmt = stmt.where(KnowledgeNode.project_id == project_id)
-        stmt = stmt.order_by(KnowledgeNode.project_id, KnowledgeNode.code)
         nodes = session.exec(stmt).all()
+        nodes = sorted(
+            list(nodes),
+            key=lambda n: (n.project_id, course_code_sort_key(n.code)),
+        )
 
         # 按项目分组, 同项目共用 topic
         proj_topics: dict[int, str] = {}

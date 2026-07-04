@@ -51,6 +51,41 @@ class TestPathGeneratorPageLogic:
     def test_roadmap_to_markdown_empty(self, path_page):
         assert "空" in path_page._roadmap_to_markdown({})
 
+    def test_roadmap_to_markdown_sorts_decimal_codes_numerically(self, path_page):
+        roadmap = {
+            "summary": "Decimal ordering",
+            "nodes": [
+                {
+                    "code": "2.10",
+                    "title": "Two ten",
+                    "stage": "strengthen",
+                    "est_hours": 1,
+                    "difficulty": 2,
+                    "prerequisites": [],
+                },
+                {
+                    "code": "2.1",
+                    "title": "Two one",
+                    "stage": "strengthen",
+                    "est_hours": 1,
+                    "difficulty": 2,
+                    "prerequisites": [],
+                },
+                {
+                    "code": "2.2",
+                    "title": "Two two",
+                    "stage": "strengthen",
+                    "est_hours": 1,
+                    "difficulty": 2,
+                    "prerequisites": [],
+                },
+            ],
+        }
+
+        md = path_page._roadmap_to_markdown(roadmap)
+
+        assert md.index("[2.1]") < md.index("[2.2]") < md.index("[2.10]")
+
     def test_refresh_projects_returns_list(self, path_page):
         assert isinstance(path_page._refresh_projects(), list)
 
@@ -97,6 +132,53 @@ class TestSaveWithSetup:
         )
         assert results[-1][0] is not None
         assert "准备就绪" in results[-1][1]
+
+    def test_save_pre_gen_uses_numeric_course_order(
+        self, path_page, session, mock_llm, monkeypatch
+    ):
+        from sqlmodel import Session
+
+        from learning_ext.db.models import KnowledgeNode
+        import learning_ext.pages.path_generator as path_page_module
+        import learning_ext.progress.study as study
+
+        monkeypatch.setattr(path_page_module, "engine", session.get_bind())
+        roadmap = {
+            "summary": "numeric pregen",
+            "stages": [],
+            "nodes": [
+                {
+                    "code": code,
+                    "title": f"Course {code}",
+                    "stage": "strengthen",
+                    "est_hours": 1,
+                    "difficulty": 2,
+                    "prerequisites": [],
+                }
+                for code in ["2.10", "2.1", "2.2", "2.3"]
+            ],
+        }
+        generated_codes = []
+
+        def fake_generate_node_summary_to_db(node_id, *_args, **_kwargs):
+            with Session(session.get_bind()) as fresh_session:
+                node = fresh_session.get(KnowledgeNode, node_id)
+                generated_codes.append(node.code)
+            return True
+
+        monkeypatch.setattr(
+            study, "generate_env_checklist", lambda *_args, **_kwargs: "env"
+        )
+        monkeypatch.setattr(
+            study, "generate_node_summary_to_db", fake_generate_node_summary_to_db
+        )
+        monkeypatch.setattr(
+            study, "generate_summaries_background", lambda *_args, **_kwargs: None
+        )
+
+        list(path_page._handle_save_with_setup("t", "", "", 5, json.dumps(roadmap)))
+
+        assert generated_codes == ["2.1", "2.2", "2.3"]
 
 
 class TestLearningAppEventRegistration:
@@ -168,6 +250,16 @@ class TestStudyWorkbenchPageLogic:
         assert "with gr.Column(scale=2, min_width=300" in source
         assert "with gr.Column(scale=5, min_width=400" in source
         assert "with gr.Column(scale=3, min_width=430" in source
+
+    def test_workbench_exposes_practice_lesson_tab_and_button(self):
+        import learning_ext.pages.study_workbench as wb
+
+        ui_source = inspect.getsource(wb.StudyWorkbenchPage.on_building_ui)
+        event_source = inspect.getsource(wb.StudyWorkbenchPage.on_register_events)
+
+        assert "🧪 实操课程" in ui_source
+        assert "生成实操课程" in ui_source
+        assert "self.gen_practice_btn.click" in event_source
 
     def test_word_lookup_js_is_event_handler_with_confirmation_popup(self):
         import learning_ext.pages.study_workbench as wb
@@ -301,7 +393,7 @@ class TestStudyWorkbenchPageLogic:
 
         result = page._on_course_change("__stage__")
 
-        assert len(result) == 7
+        assert len(result) == 8
         assert all(item["__type__"] == "update" for item in result)
 
     def test_regen_current_node_forces_existing_content_regeneration(
@@ -369,6 +461,107 @@ class TestStudyWorkbenchPageLogic:
         assert result == "解释结果"
         assert captured == {"term": "概念", "node_id": str(node.id)}
 
+    def test_selecting_course_renders_saved_practice_lesson(
+        self, session, sample_project, monkeypatch
+    ):
+        from sqlmodel import select
+
+        from learning_ext.db.models import KnowledgeNode, Task
+
+        _, page = self._make_page(session, monkeypatch)
+        node = session.exec(select(KnowledgeNode)).first()
+        node.description = (
+            "## 完整导览\n"
+            + "这是可以直接学习的完整课程正文。" * 60
+            + "\n\n## 自测练习\n- 解释关键概念。"
+        )
+        session.add(node)
+        session.add(
+            Task(
+                project_id=sample_project.id,
+                node_id=node.id,
+                title=f"🧪 实操课程：{node.title}",
+                description="## 微调流程\n```bash\npython train.py\n```",
+                task_type="practice",
+            )
+        )
+        session.commit()
+
+        result = page._on_node_select(str(node.id))
+
+        assert len(result) == 8
+        assert "微调流程" in result[3]
+        assert "python train.py" in result[3]
+
+    def test_selecting_course_starts_background_resource_fetch_when_empty(
+        self, session, sample_project, monkeypatch
+    ):
+        from sqlmodel import select
+
+        from learning_ext.db.models import KnowledgeNode, NodeResource
+
+        _, page = self._make_page(session, monkeypatch)
+        node = session.exec(select(KnowledgeNode)).first()
+        node.description = (
+            "## 完整导览\n"
+            + "这是可以直接学习的完整课程正文。" * 60
+            + "\n\n## 自测练习\n- 解释关键概念。"
+        )
+        session.add(node)
+        for resource in session.exec(
+            select(NodeResource).where(NodeResource.node_id == node.id)
+        ).all():
+            session.delete(resource)
+        session.commit()
+        captured = {}
+
+        def fake_ensure_resources_background(node_id, project_id):
+            captured["args"] = (node_id, project_id)
+            return "⏳ 正在自动拉取参考资料，稍后刷新本节即可查看。"
+
+        monkeypatch.setattr(
+            page, "_ensure_resources_background", fake_ensure_resources_background
+        )
+
+        result = page._on_node_select(str(node.id))
+
+        assert captured["args"] == (node.id, sample_project.id)
+        assert "自动拉取参考资料" in result[5]
+
+    def test_auto_init_starts_background_resource_fetch_for_first_course(
+        self, session, sample_project, monkeypatch
+    ):
+        from sqlmodel import select
+
+        from learning_ext.db.models import KnowledgeNode, NodeResource
+
+        _, page = self._make_page(session, monkeypatch)
+        node = session.exec(select(KnowledgeNode)).first()
+        node.description = (
+            "## 完整导览\n"
+            + "这是可以直接学习的完整课程正文。" * 60
+            + "\n\n## 自测练习\n- 解释关键概念。"
+        )
+        session.add(node)
+        for resource in session.exec(
+            select(NodeResource).where(NodeResource.node_id == node.id)
+        ).all():
+            session.delete(resource)
+        session.commit()
+        captured = {}
+
+        def fake_ensure_resources_background(node_id, project_id):
+            captured["args"] = (node_id, project_id)
+            return "⏳ 正在自动拉取参考资料，稍后刷新本节即可查看。"
+
+        monkeypatch.setattr(
+            page, "_ensure_resources_background", fake_ensure_resources_background
+        )
+
+        result = page._auto_init()
+
+        assert captured["args"] == (node.id, sample_project.id)
+        assert "自动拉取参考资料" in result[10]
 
     def test_append_latest_assistant_reply_adds_supplement_without_rewriting(
         self, session, sample_project, monkeypatch
