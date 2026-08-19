@@ -22,7 +22,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [1/3] 创建 Kotaemon Python 虚拟环境并安装依赖 (这一步最久)...
+echo [1/4] 创建 Kotaemon Python 虚拟环境并安装依赖 (这一步最久)...
 cd /d "%~dp0kotaemon"
 uv sync --python 3.11
 if errorlevel 1 (
@@ -32,7 +32,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/3] 安装 FSRS 间隔重复算法库...
+echo [2/4] 安装 FSRS 间隔重复算法库...
 set VIRTUAL_ENV=%cd%\.venv
 uv pip install fsrs pywebview
 if errorlevel 1 (
@@ -42,7 +42,16 @@ if errorlevel 1 (
 )
 
 echo.
-echo [3/3] 环境初始化完成！
+echo [3/4] 构建学习驾驶舱前端...
+cd /d "%~dp0"
+call build_web.bat
+if errorlevel 1 (
+    echo [错误] 前端构建失败
+    pause
+    exit /b 1
+)
+
+echo [4/4] 环境初始化完成！
 echo.
 echo 下一步: 双击 run.bat 启动程序
 echo.

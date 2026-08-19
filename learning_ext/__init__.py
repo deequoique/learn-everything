@@ -11,10 +11,10 @@ learning_ext - 学习 Agent 的学习特化模块
     - exporter:       导出 Anki / Markdown / PDF
     - db:             学习相关数据模型 (复用 Kotaemon 的 SQLite engine)
     - llm:            LLM 调用封装 (复用 Kotaemon 的 LLM 配置)
-    - pages:          Gradio Tab 页面 (BasePage 子类)
+    - api/web:        FastAPI 接口与 React 学习驾驶舱
 
 设计原则：
-    1. 本模块与 Kotaemon 底座解耦，便于阶段 5 迁移到独立 Next.js 前端
+    1. React 前端通过 API 与 Kotaemon 底座解耦
     2. 所有持久化复用 Kotaemon 的 KH_DATABASE (SQLite) 与 KH_FILESTORAGE_PATH
     3. LLM 调用复用 Kotaemon 已配置的模型，不重复造轮子
 """

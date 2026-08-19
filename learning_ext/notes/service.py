@@ -13,7 +13,6 @@ from sqlmodel import Session, select
 
 from learning_ext.db.models import (
     KnowledgeNode,
-    LearningProject,
     NodeNote,
     NodeResource,
 )
@@ -42,11 +41,13 @@ def save_note(
     project_id: int,
     content: str,
     user_id: str = "default",
+    selection: str = "",
 ) -> NodeNote:
     """保存/更新笔记 (upsert)。"""
     note = get_note(session, node_id, user_id)
     if note:
         note.content = content
+        note.selection = selection
         note.updated_at = datetime.utcnow()
     else:
         note = NodeNote(
@@ -54,6 +55,7 @@ def save_note(
             node_id=node_id,
             project_id=project_id,
             content=content,
+            selection=selection,
         )
     session.add(note)
     session.commit()
@@ -72,7 +74,12 @@ def get_resources(session: Session, node_id: int) -> List[NodeResource]:
     ).all()
 
 
-def generate_resources(node: KnowledgeNode, project_topic: str) -> List[dict]:
+def generate_resources(
+    node: KnowledgeNode,
+    project_topic: str,
+    *,
+    fetch_content: bool = True,
+) -> List[dict]:
     """AI 推荐正文实际用到的参考资料，并抓取 PDF/HTML 正文入库。"""
     prompt = f"""请根据下面这节课程正文，找出正文实际需要引用或支撑的参考资料。返回 JSON 数组，每项：
 {{
@@ -106,6 +113,31 @@ def generate_resources(node: KnowledgeNode, project_topic: str) -> List[dict]:
     for item in candidates[:6]:
         url = str(item.get("url", "")).strip()
         if not _is_fetchable_url(url):
+            continue
+        if not fetch_content:
+            reference_for = (
+                item.get("reference_for")
+                or item.get("section")
+                or item.get("used_for")
+                or "本节相关内容"
+            )
+            note = str(item.get("description", "")).strip()
+            description = f"参考位置：{str(reference_for).strip() or '本节相关内容'}"
+            if note:
+                description += f"\n说明：{note}"
+            fetched_resources.append(
+                {
+                    "title": item.get("title", ""),
+                    "url": url,
+                    "rtype": _normalize_resource_type(
+                        item.get("rtype"),
+                        _resource_format_from_url(url),
+                    ),
+                    "description": description,
+                    "preview": "",
+                    "fetch_status": "not_fetched",
+                }
+            )
             continue
         fetched = fetch_resource_content(url)
         fetched_format = fetched.get("format") or _resource_format_from_url(url)

@@ -9,6 +9,12 @@ echo   学习 Agent - 组装可分发的便携版
 echo ============================================================
 echo.
 
+call build_web.bat
+if errorlevel 1 (
+    echo [错误] 前端构建失败，停止组装便携版
+    exit /b 1
+)
+
 REM 1. 先确保 exe 已打包
 if not exist "dist\LearnEverything\LearnEverything.exe" (
     echo [!] 未找到打包好的 exe，先执行 build_exe.bat
@@ -26,7 +32,27 @@ xcopy /E /I /Y "dist\LearnEverything\*" "%PORTABLE%\" >nul
 
 echo [3/4] 复制学习 Agent 代码...
 copy /Y custom_app.py "%PORTABLE%\" >nul
-xcopy /E /I /Y learning_ext "%PORTABLE%\learning_ext" >nul
+robocopy learning_ext "%PORTABLE%\learning_ext" /E /XD node_modules coverage playwright-report test-results /XF *.pyc >nul
+if errorlevel 8 (
+    echo [错误] learning_ext 复制失败
+    exit /b 1
+)
+if not exist "%PORTABLE%\learning_ext\web\dist\index.html" (
+    echo [错误] 便携版缺少前端构建产物
+    exit /b 1
+)
+if exist "%PORTABLE%\learning_ext\web\node_modules" (
+    echo [错误] 便携版不应包含 node_modules
+    exit /b 1
+)
+if exist "%PORTABLE%\learning_ext\app.py" (
+    echo [错误] 便携版不应包含已移除的旧 Web 入口
+    exit /b 1
+)
+if exist "%PORTABLE%\learning_ext\pages" (
+    echo [错误] 便携版不应包含已移除的页面目录
+    exit /b 1
+)
 copy /Y README.md "%PORTABLE%\" >nul
 copy /Y .env "%PORTABLE%\" >nul
 

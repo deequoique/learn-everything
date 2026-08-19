@@ -1,13 +1,13 @@
-"""学习 Agent - Windows 桌面启动器。
+"""学习 Agent - 跨平台启动器。
 
 职责：
     1. 定位 Kotaemon venv 和项目根目录
     2. 设置环境变量 (Python 路径、cohere 占位等)
-    3. 启动 LearningApp 的 Gradio 服务 (后台线程，非阻塞)
+    3. 启动 React/FastAPI 服务 (后台进程)
     4. 主线程用 PyWebView 打开桌面窗口 (可选，环境无 pywebview 则退化为浏览器)
 
 使用：
-    直接双击运行，或被 run.bat / PyInstaller 打包的 exe 调用。
+    直接运行，或被平台启动脚本 / PyInstaller 打包产物调用。
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import urlopen
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,11 +66,30 @@ else:
     _MEIPASS = BASE_DIR
 
 KOTAEMON_DIR = BASE_DIR / "kotaemon"
-VENV_PYTHON = KOTAEMON_DIR / ".venv" / "Scripts" / "python.exe"
 CUSTOM_APP = BASE_DIR / "custom_app.py"
 
 PORT = 7860
 HOST = "127.0.0.1"
+
+
+def _venv_python_candidates(kotaemon_dir: Path, platform_name: str | None = None) -> list[Path]:
+    platform_name = platform_name or os.name
+    windows_path = kotaemon_dir / ".venv" / "Scripts" / "python.exe"
+    posix_path = kotaemon_dir / ".venv" / "bin" / "python"
+    if platform_name == "nt":
+        return [windows_path, posix_path]
+    return [posix_path, windows_path]
+
+
+def _resolve_venv_python(kotaemon_dir: Path) -> Path:
+    candidates = _venv_python_candidates(kotaemon_dir)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+VENV_PYTHON = _resolve_venv_python(KOTAEMON_DIR)
 
 
 def is_venv_ready() -> bool:
@@ -76,13 +97,14 @@ def is_venv_ready() -> bool:
 
 
 def ensure_venv() -> None:
-    """检查 venv 是否就绪，否则提示用户运行 setup.bat"""
+    """检查 venv 是否就绪，否则提示用户运行平台安装脚本。"""
     if is_venv_ready():
         return
+    setup_script = "setup.bat" if os.name == "nt" else "setup_macos.sh"
     log.error("=" * 60)
     log.error("Kotaemon 运行环境未就绪！")
     log.error(f"未找到: {VENV_PYTHON}")
-    log.error("请先运行 setup.bat 初始化环境 (首次使用需要联网安装依赖)")
+    log.error(f"请先运行 {setup_script} 初始化环境 (首次使用需要联网安装依赖)")
     log.error("=" * 60)
     input("按回车键退出...")
     sys.exit(1)
@@ -100,30 +122,41 @@ def find_free_port(default: int = 7860) -> int:
     return default
 
 
-def wait_for_server(port: int, timeout: int = 120) -> bool:
-    """等待 Gradio 服务就绪"""
+def wait_for_server(
+    port: int,
+    timeout: int = 120,
+    proc: subprocess.Popen | None = None,
+) -> bool:
+    """等待 FastAPI 健康检查就绪，并在后端提前退出时立即停止。"""
     start = time.time()
     while time.time() - start < timeout:
+        if proc is not None and proc.poll() is not None:
+            return False
         try:
-            with socket.create_connection((HOST, port), timeout=2):
-                return True
-        except OSError:
+            with urlopen(f"http://{HOST}:{port}/api/health", timeout=2) as response:
+                if response.status == 200:
+                    import json
+
+                    payload = json.loads(response.read().decode("utf-8"))
+                    if payload.get("status") == "ok" and payload.get("api_version") == "1":
+                        return True
+        except (OSError, URLError, ValueError):
             time.sleep(1)
     return False
 
 
-def start_gradio_backend(port: int) -> subprocess.Popen:
-    """以子进程启动 Gradio 后端 (custom_app.py)。
+def start_backend(port: int) -> subprocess.Popen:
+    """以子进程启动 FastAPI 后端 (custom_app.py)。
 
-    用子进程而非线程，避免 Gradio/uvicorn 信号处理干扰主进程，
+    用子进程而非线程，避免 uvicorn 信号处理干扰主进程，
     也便于打包后隔离。
     """
     env = os.environ.copy()
     # 占位 key 避免 Kotaemon 初始化 cohere 等服务校验
     for k in ("COHERE_API_KEY", "VOYAGE_API_KEY", "MISTRAL_API_KEY", "GOOGLE_API_KEY"):
         env.setdefault(k, "placeholder-key-1234567890")
-    env["GRADIO_SERVER_NAME"] = HOST
-    env["GRADIO_SERVER_PORT"] = str(port)
+    env["LE_SERVER_HOST"] = HOST
+    env["LE_SERVER_PORT"] = str(port)
     env["PYTHONPATH"] = str(BASE_DIR) + os.pathsep + env.get("PYTHONPATH", "")
     env["PYTHONUNBUFFERED"] = "1"
 
@@ -193,10 +226,9 @@ def main():
     if port != PORT:
         log.warning(f"端口 {PORT} 被占用，改用 {port}")
 
-    # 启动 Gradio 后端
-    proc = start_gradio_backend(port)
-    log.info(f"等待后端就绪 (最多 180s)...")
-    if not wait_for_server(port, timeout=180):
+    proc = start_backend(port)
+    log.info("等待后端就绪 (最多 180s)...")
+    if not wait_for_server(port, timeout=180, proc=proc):
         log.error("后端启动超时，请查看上方日志")
         proc.terminate()
         input("按回车键退出...")
@@ -219,7 +251,7 @@ def main():
         log.info("桌面窗口已关闭，正在停止后端...")
     else:
         webbrowser.open(url)
-        log.info("已在浏览器打开 (http://127.0.0.1:7860)。关闭本窗口或 Ctrl+C 退出。")
+        log.info(f"已在浏览器打开 ({url})。关闭本窗口或 Ctrl+C 退出。")
         try:
             proc.wait()
         except KeyboardInterrupt:

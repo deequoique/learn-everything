@@ -180,9 +180,14 @@ def chat(
 
 
 def _stream_iter(resp) -> Iterator[str]:
-    for chunk in resp:
-        if chunk.choices and chunk.choices[0].delta.content:
-            yield chunk.choices[0].delta.content
+    try:
+        for chunk in resp:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+    finally:
+        close = getattr(resp, "close", None)
+        if callable(close):
+            close()
 
 
 def chat_json(

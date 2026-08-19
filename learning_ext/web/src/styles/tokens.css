@@ -1,0 +1,32 @@
+:root {
+  color-scheme: light;
+  font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+  font-synthesis: none;
+  --fog: #f5f7fb;
+  --paper: #ffffff;
+  --ink: #172033;
+  --ink-soft: #536078;
+  --ink-muted: #8490a5;
+  --line: #e3e8f2;
+  --line-strong: #cfd7e7;
+  --indigo: #4e5bd5;
+  --indigo-dark: #3743b2;
+  --indigo-pale: #eef0ff;
+  --mint: #2fa37a;
+  --mint-pale: #e8f7f0;
+  --amber: #d58b27;
+  --amber-pale: #fff5e4;
+  --rose: #c55d72;
+  --rose-pale: #fff0f3;
+  --shadow-sm: 0 1px 2px rgba(23, 32, 51, 0.04);
+  --shadow-md: 0 12px 32px rgba(23, 32, 51, 0.08);
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --sidebar-width: 232px;
+  --topbar-height: 64px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}

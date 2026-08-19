@@ -377,9 +377,10 @@ def load_roadmap(session: Session, project_id: int) -> dict:
 
     return {
         "summary": project.title,
-        "stages": _distinct_stages(nodes),
+        "stages": _distinct_stages(nodes, project.roadmap_json),
         "nodes": [
             {
+                "node_id": n.id,
                 "code": n.code,
                 "title": n.title,
                 "description": n.description,
@@ -395,11 +396,24 @@ def load_roadmap(session: Session, project_id: int) -> dict:
     }
 
 
-def _distinct_stages(nodes):
+def _distinct_stages(nodes, roadmap_json: str = "{}"):
+    try:
+        saved_stages = json.loads(roadmap_json).get("stages", [])
+    except (json.JSONDecodeError, AttributeError):
+        saved_stages = []
+    labels = {
+        str(stage.get("stage")): {
+            "name": str(stage.get("name") or stage.get("stage")),
+            "goal": str(stage.get("goal") or ""),
+        }
+        for stage in saved_stages
+        if isinstance(stage, dict) and stage.get("stage")
+    }
     seen = []
     for n in nodes:
         if n.stage not in [s["stage"] for s in seen]:
-            seen.append({"name": n.stage, "stage": n.stage, "goal": ""})
+            label = labels.get(n.stage, {"name": n.stage, "goal": ""})
+            seen.append({"name": label["name"], "stage": n.stage, "goal": label["goal"]})
     return seen
 
 
