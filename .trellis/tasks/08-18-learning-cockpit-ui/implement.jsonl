@@ -1,0 +1,12 @@
+{"file": ".trellis/spec/kotaemon/backend/index.md", "reason": "Backend package guideline index; project-specific files are placeholders, so task design remains authoritative."}
+{"file": ".trellis/spec/kotaemon/frontend/index.md", "reason": "Frontend package guideline index for the new React/Vite surface."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Prevent API routes and React consumers from duplicating service, payload, and event logic."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Required for DB→service→API/SSE→React contracts and shared decoders."}
+{"file": ".trellis/tasks/08-18-learning-cockpit-ui/research/frontend-desktop.md", "reason": "Executable React/Vite, roadmap, launcher, packaging, and frontend validation research."}
+{"file": ".trellis/tasks/08-18-learning-cockpit-ui/research/backend-api-kotaemon.md", "reason": "Executable FastAPI/SSE/session/security/Kotaemon adapter research and test matrix."}
+{"file": ".trellis/spec/kotaemon/backend/database-guidelines.md", "reason": "Session lifecycle, ownership, and ORM-to-DTO boundary checklist."}
+{"file": ".trellis/spec/kotaemon/backend/error-handling.md", "reason": "Stable API/SSE error mapping and secret-safe failures."}
+{"file": ".trellis/spec/kotaemon/backend/quality-guidelines.md", "reason": "Backend testing and dependency-injection quality checklist."}
+{"file": ".trellis/spec/kotaemon/frontend/component-guidelines.md", "reason": "React component and accessibility checklist."}
+{"file": ".trellis/spec/kotaemon/frontend/state-management.md", "reason": "Server/local/stream state ownership checklist."}
+{"file": ".trellis/spec/kotaemon/frontend/type-safety.md", "reason": "Runtime API/SSE validation and TypeScript contract checklist."}

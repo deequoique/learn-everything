@@ -1,0 +1,12 @@
+{"file": ".trellis/spec/kotaemon/backend/index.md", "reason": "Backend review scope and package boundary index."}
+{"file": ".trellis/spec/kotaemon/frontend/index.md", "reason": "Frontend review scope and package boundary index."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Audit duplicated contracts, constants, and SSE payload parsing."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Audit round trips and validation across service, API, SSE, and UI."}
+{"file": ".trellis/tasks/08-18-learning-cockpit-ui/research/frontend-desktop.md", "reason": "Executable React/Vite, roadmap, launcher, packaging, and frontend validation research."}
+{"file": ".trellis/tasks/08-18-learning-cockpit-ui/research/backend-api-kotaemon.md", "reason": "Audit headless adapter, ownership, cancellation, indexing compensation, and security contracts."}
+{"file": ".trellis/spec/kotaemon/backend/database-guidelines.md", "reason": "Review sessions, transactions, compensation, and ownership."}
+{"file": ".trellis/spec/kotaemon/backend/error-handling.md", "reason": "Review REST/SSE errors for stable codes and secret safety."}
+{"file": ".trellis/spec/kotaemon/backend/quality-guidelines.md", "reason": "Review backend tests and dependency injection."}
+{"file": ".trellis/spec/kotaemon/frontend/component-guidelines.md", "reason": "Review React composition and accessibility."}
+{"file": ".trellis/spec/kotaemon/frontend/state-management.md", "reason": "Review Query/local/stream state separation."}
+{"file": ".trellis/spec/kotaemon/frontend/type-safety.md", "reason": "Review runtime decoders and exhaustive stream reducers."}
