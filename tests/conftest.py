@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -24,6 +23,24 @@ for k in ("COHERE_API_KEY", "VOYAGE_API_KEY", "MISTRAL_API_KEY", "GOOGLE_API_KEY
     os.environ.setdefault(k, "placeholder-test-key")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+
+def _install_offline_tiktoken_fallback() -> None:
+    try:
+        import tiktoken
+
+        fallback = tiktoken.Encoding(
+            name="learn-everything-test-byte-fallback",
+            pat_str=r"[\s\S]",
+            mergeable_ranks={bytes([value]): value for value in range(256)},
+            special_tokens={},
+        )
+        tiktoken.encoding_for_model = lambda _model: fallback
+    except Exception:
+        pass
+
+
+_install_offline_tiktoken_fallback()
 
 
 # ============== Session-scoped DB ==============
@@ -63,6 +80,8 @@ def session(_db_engine) -> Iterator:
             "le_quiz",
             "le_progress",
             "le_task",
+            "le_resource",
+            "le_note",
             "le_kedge",
             "le_knode",
             "le_project",
@@ -92,8 +111,6 @@ def mock_llm(monkeypatch):
         return "这是模拟的 LLM 回复。"
 
     def _fake_chat_json(prompt, *, system=None, model_name=None):
-        import json as _json
-
         sys_p = system or ""
         if "学习路线" in prompt or (
             "知识点" in prompt[:100] and "prerequisites" in (sys_p + prompt)
